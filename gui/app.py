@@ -367,8 +367,33 @@ class AudioDuplicateDetectorApp(QMainWindow):
 
 
 def run_gui(initial_folder=None):
+    # Set Windows App User Model ID so the taskbar displays the custom icon properly
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("mycompany.audioduplicatedetector.v1")
+        except Exception:
+            pass
+
     app = QApplication(sys.argv)
     app.setStyleSheet(GLOBAL_QSS)
+
+    # Set Application Icon
+    icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app_icon.png")
+    if hasattr(sys, "_MEIPASS"):
+        meipass_icon = os.path.join(sys._MEIPASS, "app_icon.png")
+        if os.path.exists(meipass_icon):
+            icon_path = meipass_icon
+
+    if os.path.exists(icon_path):
+        from PyQt6.QtGui import QIcon
+        app_icon = QIcon(icon_path)
+        app.setWindowIcon(app_icon)
+
     window = AudioDuplicateDetectorApp(initial_folder)
+    if os.path.exists(icon_path):
+        from PyQt6.QtGui import QIcon
+        window.setWindowIcon(QIcon(icon_path))
+
     window.show()
     sys.exit(app.exec())

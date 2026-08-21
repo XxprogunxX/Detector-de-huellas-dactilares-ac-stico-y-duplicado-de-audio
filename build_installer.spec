@@ -5,9 +5,10 @@ from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 block_cipher = None
 
-# Ensure bin/fpcalc.exe is included in the package
+# Ensure bin/fpcalc.exe and app_icon.png are included in the package
 datas = [
     ('bin/fpcalc.exe', 'bin') if os.path.exists('bin/fpcalc.exe') else ('bin', 'bin'),
+    ('app_icon.png', '.') if os.path.exists('app_icon.png') else ('app_icon.ico', '.'),
 ]
 
 # Hidden imports that PyInstaller might miss
@@ -80,4 +81,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='app_icon.ico' if os.path.exists('app_icon.ico') else None,
 )
