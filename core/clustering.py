@@ -186,7 +186,7 @@ def cluster_duplicates(
                 dur_penalty = min(30.0, ((max_duration - t.duration) / max_duration) * 40.0)
             
             # Format preference bonus: FLAC/ALAC have proper metadata tags over raw WAV
-            fmt_bonus = 2.0 if t.format in ("FLAC", "ALAC") and not t.is_fake_lossless else 0.0
+            fmt_bonus = 2.0 if t.format in ("FLAC", "ALAC") and t.fake_lossless_confidence <= 50.0 else 0.0
             
             effective_score = t.quality_score - dur_penalty + fmt_bonus
             return (effective_score, t.quality_score, t.duration, -t.filesize)
@@ -221,15 +221,18 @@ def cluster_duplicates(
 
         # Formulate human explanation for best track recommendation
         best_reason = f"Mayor fidelidad: {best_track.quality_details} (Puntuación: {best_track.quality_score}/100)"
-        if best_track.is_fake_lossless:
-            best_reason = f"⚠️ Nota: El archivo lossless es falso (corte en {int(best_track.spectral_cutoff)}Hz). Se seleccionó la mejor fuente disponible."
+        if best_track.fake_lossless_confidence > 50.0:
+            best_reason = f"⚠️ Nota: Transcodificación probable ({best_track.fake_lossless_confidence:.0f}%). Se seleccionó la mejor fuente disponible."
 
         # Mark default actions: keep best, mark others as delete (or unset for review)
         for t in group_tracks:
-            if t.filepath == best_track.filepath:
-                t.action = FileAction.KEEP
+            if primary_type == DuplicateType.POSSIBLE_DUPLICATE:
+                t.action = FileAction.UNSET if t.filepath != best_track.filepath else FileAction.KEEP
             else:
-                t.action = FileAction.DELETE
+                if t.filepath == best_track.filepath:
+                    t.action = FileAction.KEEP
+                else:
+                    t.action = FileAction.DELETE
 
         dup_group = DuplicateGroup(
             group_id=f"GRP-{group_idx:04d}",

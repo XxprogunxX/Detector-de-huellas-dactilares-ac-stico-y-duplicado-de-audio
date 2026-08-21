@@ -52,11 +52,11 @@ def _process_audio_worker(filepath: str) -> Optional[Dict[str, Any]]:
         # 4. Selective Spectral Cutoff (Only run FFT on Lossless to catch fake upscales)
         is_lossless = meta.get("is_lossless", False)
         if is_lossless:
-            spectral_cutoff, is_fake_lossless = estimate_spectral_cutoff(filepath)
+            spectral_cutoff, fake_lossless_confidence = estimate_spectral_cutoff(filepath)
         else:
             br = meta.get("bitrate", 128)
             spectral_cutoff = 16000.0 if br <= 128 else (19000.0 if br <= 256 else 20500.0)
-            is_fake_lossless = False
+            fake_lossless_confidence = 0.0
 
         # Build raw dict for transfer back to main process
         track_data = {
@@ -73,7 +73,7 @@ def _process_audio_worker(filepath: str) -> Optional[Dict[str, Any]]:
             "bit_depth": meta.get("bit_depth", 16),
             "is_lossless": is_lossless,
             "spectral_cutoff": spectral_cutoff,
-            "is_fake_lossless": is_fake_lossless,
+            "fake_lossless_confidence": fake_lossless_confidence,
             "fingerprint_raw": raw_fp,
             "title": meta.get("title", ""),
             "artist": meta.get("artist", ""),
@@ -224,7 +224,7 @@ class AudioScanner:
                                     bit_depth=res["bit_depth"],
                                     is_lossless=res["is_lossless"],
                                     spectral_cutoff=res["spectral_cutoff"],
-                                    is_fake_lossless=res["is_fake_lossless"],
+                                    fake_lossless_confidence=res["fake_lossless_confidence"],
                                     fingerprint_raw=res["fingerprint_raw"],
                                     title=res["title"],
                                     artist=res["artist"],

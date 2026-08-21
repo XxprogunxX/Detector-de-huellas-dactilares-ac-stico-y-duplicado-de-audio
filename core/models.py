@@ -37,7 +37,7 @@ class AudioTrack:
     bit_depth: int = 16
     is_lossless: bool = False
     spectral_cutoff: float = 0.0  # in Hz
-    is_fake_lossless: bool = False
+    fake_lossless_confidence: float = 0.0  # 0.0 to 100.0%
     quality_score: float = 0.0
     quality_details: str = ""
     fingerprint_raw: List[int] = field(default_factory=list)
@@ -89,7 +89,7 @@ class AudioTrack:
             "bit_depth": self.bit_depth,
             "is_lossless": self.is_lossless,
             "spectral_cutoff": self.spectral_cutoff,
-            "is_fake_lossless": self.is_fake_lossless,
+            "fake_lossless_confidence": self.fake_lossless_confidence,
             "quality_score": self.quality_score,
             "quality_details": self.quality_details,
             "title": self.title,

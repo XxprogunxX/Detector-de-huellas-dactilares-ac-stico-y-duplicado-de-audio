@@ -65,7 +65,7 @@ class Database:
                     bit_depth INTEGER,
                     is_lossless INTEGER,
                     spectral_cutoff REAL,
-                    is_fake_lossless INTEGER,
+                    fake_lossless_confidence REAL,
                     quality_score REAL,
                     quality_details TEXT,
                     fingerprint BLOB,
@@ -79,6 +79,12 @@ class Database:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sha256 ON tracks(sha256);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_audio_hash ON tracks(audio_hash);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_duration ON tracks(duration);")
+            
+            # Migrate old column if exists
+            try:
+                conn.execute("ALTER TABLE tracks RENAME COLUMN is_fake_lossless TO fake_lossless_confidence;")
+            except sqlite3.OperationalError:
+                pass
 
     def get_all_cached_lookup(self) -> Dict[str, AudioTrack]:
         """Returns a fast lookup dict of all cached AudioTracks indexed by filepath."""
@@ -88,7 +94,7 @@ class Database:
             cursor.execute(
                 "SELECT id, filepath, filesize, mtime, sha256, audio_hash, duration, format, "
                 "bitrate, samplerate, channels, bit_depth, is_lossless, spectral_cutoff, "
-                "is_fake_lossless, quality_score, quality_details, fingerprint, title, artist, album "
+                "fake_lossless_confidence, quality_score, quality_details, fingerprint, title, artist, album "
                 "FROM tracks"
             )
             for row in cursor.fetchall():
@@ -103,7 +109,7 @@ class Database:
             cursor.execute(
                 "SELECT id, filepath, filesize, mtime, sha256, audio_hash, duration, format, "
                 "bitrate, samplerate, channels, bit_depth, is_lossless, spectral_cutoff, "
-                "is_fake_lossless, quality_score, quality_details, fingerprint, title, artist, album "
+                "fake_lossless_confidence, quality_score, quality_details, fingerprint, title, artist, album "
                 "FROM tracks WHERE filepath = ? AND filesize = ? AND ABS(mtime - ?) < 0.001",
                 (filepath, filesize, mtime)
             )
@@ -120,7 +126,7 @@ class Database:
                 INSERT INTO tracks (
                     filepath, filesize, mtime, sha256, audio_hash, duration, format,
                     bitrate, samplerate, channels, bit_depth, is_lossless, spectral_cutoff,
-                    is_fake_lossless, quality_score, quality_details, fingerprint, title, artist, album, last_scanned
+                    fake_lossless_confidence, quality_score, quality_details, fingerprint, title, artist, album, last_scanned
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(filepath) DO UPDATE SET
                     filesize = excluded.filesize,
@@ -135,7 +141,7 @@ class Database:
                     bit_depth = excluded.bit_depth,
                     is_lossless = excluded.is_lossless,
                     spectral_cutoff = excluded.spectral_cutoff,
-                    is_fake_lossless = excluded.is_fake_lossless,
+                    fake_lossless_confidence = excluded.fake_lossless_confidence,
                     quality_score = excluded.quality_score,
                     quality_details = excluded.quality_details,
                     fingerprint = excluded.fingerprint,
@@ -147,7 +153,7 @@ class Database:
                 track.filepath, track.filesize, track.mtime, track.sha256, track.audio_hash,
                 track.duration, track.format, track.bitrate, track.samplerate, track.channels,
                 track.bit_depth, 1 if track.is_lossless else 0, track.spectral_cutoff,
-                1 if track.is_fake_lossless else 0, track.quality_score, track.quality_details,
+                track.fake_lossless_confidence, track.quality_score, track.quality_details,
                 fp_blob, track.title, track.artist, track.album
             ))
 
@@ -162,7 +168,7 @@ class Database:
                 t.filepath, t.filesize, t.mtime, t.sha256, t.audio_hash,
                 t.duration, t.format, t.bitrate, t.samplerate, t.channels,
                 t.bit_depth, 1 if t.is_lossless else 0, t.spectral_cutoff,
-                1 if t.is_fake_lossless else 0, t.quality_score, t.quality_details,
+                t.fake_lossless_confidence, t.quality_score, t.quality_details,
                 fp_blob, t.title, t.artist, t.album
             ))
         with self._get_connection() as conn:
@@ -170,7 +176,7 @@ class Database:
                 INSERT INTO tracks (
                     filepath, filesize, mtime, sha256, audio_hash, duration, format,
                     bitrate, samplerate, channels, bit_depth, is_lossless, spectral_cutoff,
-                    is_fake_lossless, quality_score, quality_details, fingerprint, title, artist, album, last_scanned
+                    fake_lossless_confidence, quality_score, quality_details, fingerprint, title, artist, album, last_scanned
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(filepath) DO UPDATE SET
                     filesize = excluded.filesize,
@@ -185,7 +191,7 @@ class Database:
                     bit_depth = excluded.bit_depth,
                     is_lossless = excluded.is_lossless,
                     spectral_cutoff = excluded.spectral_cutoff,
-                    is_fake_lossless = excluded.is_fake_lossless,
+                    fake_lossless_confidence = excluded.fake_lossless_confidence,
                     quality_score = excluded.quality_score,
                     quality_details = excluded.quality_details,
                     fingerprint = excluded.fingerprint,
@@ -213,7 +219,7 @@ class Database:
                 cursor.execute(
                     f"SELECT id, filepath, filesize, mtime, sha256, audio_hash, duration, format, "
                     f"bitrate, samplerate, channels, bit_depth, is_lossless, spectral_cutoff, "
-                    f"is_fake_lossless, quality_score, quality_details, fingerprint, title, artist, album "
+                    f"fake_lossless_confidence, quality_score, quality_details, fingerprint, title, artist, album "
                     f"FROM tracks WHERE filepath IN ({placeholders})",
                     chunk
                 )
@@ -225,7 +231,7 @@ class Database:
         (
             tid, filepath, filesize, mtime, sha256, audio_hash, duration, fmt,
             bitrate, samplerate, channels, bit_depth, is_lossless, spectral_cutoff,
-            is_fake_lossless, quality_score, quality_details, fp_blob, title, artist, album
+            fake_lossless_confidence, quality_score, quality_details, fp_blob, title, artist, album
         ) = row
         
         raw_fp = decompress_fingerprint(fp_blob) if fp_blob else []
@@ -244,7 +250,7 @@ class Database:
             bit_depth=bit_depth or 16,
             is_lossless=bool(is_lossless),
             spectral_cutoff=spectral_cutoff or 0.0,
-            is_fake_lossless=bool(is_fake_lossless),
+            fake_lossless_confidence=float(fake_lossless_confidence or 0.0),
             quality_score=quality_score or 0.0,
             quality_details=quality_details or "",
             fingerprint_raw=raw_fp,

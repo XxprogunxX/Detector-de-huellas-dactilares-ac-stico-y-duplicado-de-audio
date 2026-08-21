@@ -102,14 +102,19 @@ class DuplicateGroupCard(QFrame):
         
         main_layout.addWidget(recom_frame)
 
-        # 3. Track Rows
-        max_tracks_to_show = 5
+        # 3. Track Columns (A vs B)
+        tracks_layout = QHBoxLayout()
+        tracks_layout.setSpacing(10)
+        
+        max_tracks_to_show = 4
         tracks_to_render = self.group.tracks[:max_tracks_to_show]
         
         for track in tracks_to_render:
-            row = self._create_track_row(track)
-            main_layout.addWidget(row)
-            self.track_rows.append(row)
+            col = self._create_track_column(track, is_best=(track.filepath == self.group.best_track_path))
+            tracks_layout.addWidget(col)
+            self.track_rows.append(col)
+            
+        main_layout.addLayout(tracks_layout)
             
         remaining_tracks = len(self.group.tracks) - max_tracks_to_show
         if remaining_tracks > 0:
@@ -127,82 +132,91 @@ class DuplicateGroupCard(QFrame):
         else:
             return COLORS["badge_possible_bg"], COLORS["badge_possible_text"], "POSIBLE DUPLICADO"
 
-    def _create_track_row(self, track: AudioTrack) -> QFrame:
-        row_frame = QFrame()
-        row_frame.setStyleSheet(f"""
+    def _create_track_column(self, track: AudioTrack, is_best: bool) -> QFrame:
+        col_frame = QFrame()
+        border_color = COLORS['primary'] if is_best else COLORS['border']
+        col_frame.setStyleSheet(f"""
             QFrame {{
                 background-color: {COLORS['bg_surface']};
-                border: 1px solid {COLORS['border']};
+                border: 2px solid {border_color};
                 border-radius: 8px;
             }}
         """)
-        row_layout = QVBoxLayout(row_frame)
-        row_layout.setContentsMargins(10, 8, 10, 8)
-        row_layout.setSpacing(4)
+        col_layout = QVBoxLayout(col_frame)
+        col_layout.setContentsMargins(12, 12, 12, 12)
+        col_layout.setSpacing(8)
 
-        # Top section
-        top_layout = QHBoxLayout()
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        
-        btn_action = QPushButton("CONSERVAR" if track.action == FileAction.KEEP else "ELIMINAR")
-        btn_action.setObjectName("success" if track.action == FileAction.KEEP else "danger")
-        btn_action.setFixedSize(100, 26)
-        # Using lambda with default arguments to capture the correct references
-        btn_action.clicked.connect(lambda checked, t=track, btn=btn_action: self._toggle_track_action(t, btn))
-        top_layout.addWidget(btn_action)
-
+        # Title
         lbl_title = QLabel(track.display_title)
-        lbl_title.setStyleSheet("font-weight: bold;")
-        top_layout.addWidget(lbl_title, stretch=1)
-        
-        row_layout.addLayout(top_layout)
+        lbl_title.setStyleSheet("font-weight: bold; font-size: 10pt; border: none;")
+        lbl_title.setWordWrap(True)
+        col_layout.addWidget(lbl_title)
 
-        # Middle section (Specs and controls)
-        mid_layout = QHBoxLayout()
-        mid_layout.setContentsMargins(0, 0, 0, 0)
+        # Path
+        lbl_path = QLabel(os.path.basename(os.path.dirname(track.filepath)) + "/" + track.filename)
+        lbl_path.setObjectName("small")
+        lbl_path.setStyleSheet(f"color: {COLORS['text_muted']}; border: none;")
+        lbl_path.setWordWrap(True)
+        col_layout.addWidget(lbl_path)
         
+        # Specs grid
         specs_text = (
-            f"{track.format}  |  "
-            f"{track.bitrate} kbps  |  "
-            f"{track.formatted_duration}  |  "
-            f"{track.formatted_size}  |  "
-            f"{track.samplerate}Hz ({track.bit_depth}-bit)"
+            f"<b>Formato:</b> {track.format}<br>"
+            f"<b>Bitrate:</b> {track.bitrate} kbps<br>"
+            f"<b>Frecuencia:</b> {track.samplerate}Hz ({track.bit_depth}-bit)<br>"
+            f"<b>Duración:</b> {track.formatted_duration}<br>"
+            f"<b>Tamaño:</b> {track.formatted_size}"
         )
-        if track.is_fake_lossless:
-            specs_text += "  |  Falso FLAC (Corte espectral)"
+        if track.fake_lossless_confidence > 50.0:
+            specs_text += f"<br><br><span style='color:{COLORS['warning']}'>⚠️ Transcodificación ({track.fake_lossless_confidence:.0f}%)</span>"
         elif track.is_lossless:
-            specs_text += "  |  Lossless Real"
+            specs_text += f"<br><br><span style='color:{COLORS['success']}'>✓ Lossless Auténtico</span>"
             
         lbl_specs = QLabel(specs_text)
-        lbl_specs.setObjectName("small")
-        lbl_specs.setStyleSheet(f"color: {COLORS['text_muted']}; border: none;")
-        mid_layout.addWidget(lbl_specs, stretch=1)
-
-        btn_play = QPushButton(" Escuchar")
-        btn_play.setIcon(qta.icon("fa5s.play", color=COLORS["text_main"]))
-        btn_play.setFixedHeight(24)
-        btn_play.setStyleSheet(f"background-color: {COLORS['bg_card_highlight']}; border: none;")
-        btn_play.clicked.connect(lambda checked, p=track.filepath: self._handle_play(p))
-        mid_layout.addWidget(btn_play)
-
-        self._track_widgets[track.filepath] = {"row": row_frame, "btn": btn_play}
-
-        btn_folder = QPushButton(" Ubicación")
-        btn_folder.setIcon(qta.icon("fa5s.external-link-alt", color=COLORS["text_main"]))
-        btn_folder.setFixedHeight(24)
-        btn_folder.setStyleSheet(f"background-color: {COLORS['bg_card_highlight']}; border: none;")
-        btn_folder.clicked.connect(lambda checked, p=track.filepath, r=row_frame, b=btn_folder: self._handle_open_folder(p, r, b))
-        mid_layout.addWidget(btn_folder)
+        lbl_specs.setStyleSheet("border: none;")
+        col_layout.addWidget(lbl_specs)
         
-        row_layout.addLayout(mid_layout)
+        col_layout.addStretch()
 
-        # Bottom section (Path)
-        lbl_path = QLabel(f"{track.filepath}")
-        lbl_path.setObjectName("dim")
-        lbl_path.setStyleSheet("border: none;")
-        row_layout.addWidget(lbl_path)
+        # Controls
+        controls_layout = QHBoxLayout()
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        
+        btn_play = QPushButton("")
+        btn_play.setIcon(qta.icon("fa5s.play", color=COLORS["text_main"]))
+        btn_play.setToolTip("Escuchar")
+        btn_play.setFixedSize(32, 32)
+        btn_play.setStyleSheet(f"background-color: {COLORS['bg_card_highlight']}; border: none; border-radius: 4px;")
+        btn_play.clicked.connect(lambda checked, p=track.filepath: self._handle_play(p))
+        controls_layout.addWidget(btn_play)
+        
+        self._track_widgets[track.filepath] = {"row": col_frame, "btn": btn_play}
 
-        return row_frame
+        btn_folder = QPushButton("")
+        btn_folder.setIcon(qta.icon("fa5s.external-link-alt", color=COLORS["text_main"]))
+        btn_folder.setToolTip("Abrir ubicación")
+        btn_folder.setFixedSize(32, 32)
+        btn_folder.setStyleSheet(f"background-color: {COLORS['bg_card_highlight']}; border: none; border-radius: 4px;")
+        btn_folder.clicked.connect(lambda checked, p=track.filepath, r=col_frame, b=btn_folder: self._handle_open_folder(p, r, b))
+        controls_layout.addWidget(btn_folder)
+        controls_layout.addStretch()
+
+        col_layout.addLayout(controls_layout)
+
+        # Action Button
+        btn_action = QPushButton("CONSERVAR" if track.action == FileAction.KEEP else ("ELIMINAR" if track.action == FileAction.DELETE else "REVISAR"))
+        if track.action == FileAction.KEEP:
+            btn_action.setObjectName("success")
+        elif track.action == FileAction.DELETE:
+            btn_action.setObjectName("danger")
+        else:
+            btn_action.setObjectName("primary")
+            
+        btn_action.setFixedHeight(30)
+        btn_action.clicked.connect(lambda checked, t=track, btn=btn_action: self._toggle_track_action(t, btn))
+        col_layout.addWidget(btn_action)
+
+        return col_frame
 
     def _reset_all_rows_styling(self):
         for row in self.track_rows:
@@ -266,7 +280,7 @@ class DuplicateGroupCard(QFrame):
         """)
 
     def _toggle_track_action(self, track: AudioTrack, btn: QPushButton):
-        if track.action == FileAction.KEEP:
+        if track.action == FileAction.KEEP or track.action == FileAction.UNSET:
             track.action = FileAction.DELETE
             btn.setText("ELIMINAR")
             btn.setObjectName("danger")

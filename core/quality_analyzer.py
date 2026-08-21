@@ -10,13 +10,13 @@ from typing import Tuple, Dict, Any, Optional
 from core.models import AudioTrack
 
 
-def estimate_spectral_cutoff(filepath: str, sample_rate: int = 44100, duration_probe: float = 20.0) -> Tuple[float, bool]:
+def estimate_spectral_cutoff(filepath: str, sample_rate: int = 44100, duration_probe: float = 20.0) -> Tuple[float, float]:
     """
     Estimates the true acoustic high-frequency cutoff frequency (in Hz)
     using FFT spectral energy analysis to detect up-sampled / transcoded audio.
     
     Returns:
-        (spectral_cutoff_hz, is_fake_lossless)
+        (spectral_cutoff_hz, fake_lossless_confidence_percentage)
     """
     ext = os.path.splitext(filepath)[1].lower().lstrip(".")
     is_lossless_container = ext in {"flac", "wav", "alac", "aiff", "ape", "wv"}
@@ -42,11 +42,11 @@ def estimate_spectral_cutoff(filepath: str, sample_rate: int = 44100, duration_p
         proc.wait()
 
         if len(raw_bytes) < sample_rate * 2:
-            return 22050.0 if is_lossless_container else 20000.0, False
+            return 22050.0 if is_lossless_container else 20000.0, 0.0
 
         audio_samples = np.frombuffer(raw_bytes, dtype=np.float32)
         if len(audio_samples) == 0 or np.max(np.abs(audio_samples)) < 1e-5:
-            return 22050.0 if is_lossless_container else 20000.0, False
+            return 22050.0 if is_lossless_container else 20000.0, 0.0
 
         # Compute Power Spectral Density via Welch / FFT
         n_fft = 2048
@@ -54,7 +54,7 @@ def estimate_spectral_cutoff(filepath: str, sample_rate: int = 44100, duration_p
         # Windowed STFT
         num_frames = (len(audio_samples) - n_fft) // hop_length
         if num_frames <= 0:
-            return 22050.0, False
+            return 22050.0, 0.0
 
         window = np.hanning(n_fft)
         power_spectrum = np.zeros(n_fft // 2 + 1, dtype=np.float64)
@@ -77,7 +77,7 @@ def estimate_spectral_cutoff(filepath: str, sample_rate: int = 44100, duration_p
         mid_mask = (freqs >= 1000) & (freqs <= 5000)
         peak_mid_power = np.max(power_spectrum[mid_mask]) if np.any(mid_mask) else np.max(power_spectrum)
         if peak_mid_power <= 1e-12:
-            return 22050.0, False
+            return 22050.0, 0.0
 
         power_db = 10.0 * np.log10(np.maximum(power_spectrum / peak_mid_power, 1e-8))
 
@@ -96,17 +96,17 @@ def estimate_spectral_cutoff(filepath: str, sample_rate: int = 44100, duration_p
         # Transcode / Fake Lossless Detection:
         # If in a FLAC/WAV container, but cutoff is <= 16.5 kHz (128k MP3 transcode)
         # or <= 18.8 kHz with sharp drop (192k MP3 transcode)
-        is_fake_lossless = False
+        confidence = 0.0
         if is_lossless_container:
             if cutoff_hz < 16800:
-                is_fake_lossless = True
+                confidence = min(100.0, max(80.0, 100.0 - (cutoff_hz - 14000) / 2800 * 20.0))
             elif cutoff_hz < 19200 and np.mean(power_db[freqs > 19500]) < -55.0:
-                is_fake_lossless = True
+                confidence = min(80.0, max(50.0, 80.0 - (cutoff_hz - 16800) / 2400 * 30.0))
 
-        return float(cutoff_hz), is_fake_lossless
+        return float(cutoff_hz), confidence
 
     except Exception:
-        return 22050.0 if is_lossless_container else 20000.0, False
+        return 22050.0 if is_lossless_container else 20000.0, 0.0
 
 
 def evaluate_track_quality(track: AudioTrack) -> None:
@@ -120,9 +120,10 @@ def evaluate_track_quality(track: AudioTrack) -> None:
 
     # 1. Container & Lossless fidelity (Base: 40 pts max)
     if track.is_lossless:
-        if track.is_fake_lossless:
-            score += 18.0
-            details.append(f"⚠️ Falso Lossless ({track.format} inflado desde MP3 ~{int(track.spectral_cutoff/100)}kbps)")
+        if track.fake_lossless_confidence > 50.0:
+            penalty = (track.fake_lossless_confidence - 50.0) / 50.0 * 27.0
+            score += (45.0 - penalty)
+            details.append(f"⚠️ Posible Transcodificación ({track.fake_lossless_confidence:.0f}% prob. desde lossy)")
         else:
             score += 45.0
             details.append(f"Lossless Auténtico ({track.format})")
@@ -139,13 +140,13 @@ def evaluate_track_quality(track: AudioTrack) -> None:
             details.append(track.format)
 
     # 2. Bitrate Score (30 pts max)
-    if track.is_lossless and not track.is_fake_lossless:
+    if track.is_lossless and track.fake_lossless_confidence <= 50.0:
         score += 30.0
         details.append(f"{track.bitrate} kbps")
     else:
         # Scale lossy bitrate (e.g. 320k -> 28 pts, 256k -> 24 pts, 128k -> 12 pts)
         eff_bitrate = min(320, track.bitrate) if track.bitrate > 0 else 128
-        if track.is_fake_lossless:
+        if track.fake_lossless_confidence > 50.0:
             eff_bitrate = 128 if track.spectral_cutoff < 17000 else 192
         br_score = (eff_bitrate / 320.0) * 28.0
         score += br_score

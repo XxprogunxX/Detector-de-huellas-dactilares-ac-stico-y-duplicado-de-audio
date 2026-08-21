@@ -9,6 +9,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from core.models import ScanStats
 from gui.styles import COLORS
 import qtawesome as qta
+import time
 
 
 class ScanProgressWidget(QFrame):
@@ -20,6 +21,7 @@ class ScanProgressWidget(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("transparent")  # Uses the generic background
+        self._eta_str = ""
         self._build_ui()
 
     def _build_ui(self):
@@ -112,11 +114,50 @@ class ScanProgressWidget(QFrame):
 
     def update_stats(self, stats: ScanStats):
         """Updates GUI widgets with real-time stats."""
-        # Progress value
+        # Initialize timing for moving average
+        if not hasattr(self, '_speed_samples'):
+            self._speed_samples = []
+            self._last_update_time = time.time()
+            self._last_files_scanned = stats.files_scanned
+
+        # Progress value and ETA
         if stats.total_files_found > 0:
             pct = stats.files_scanned / stats.total_files_found
             self.progress_bar.setValue(int(pct * 100))
-            pct_str = f"{int(pct * 100)}%"
+            
+            now = time.time()
+            dt = now - self._last_update_time
+            
+            # Update speed every ~2 seconds
+            if dt >= 2.0 and stats.is_running and not stats.is_paused:
+                d_files = stats.files_scanned - self._last_files_scanned
+                speed = d_files / dt
+                
+                self._speed_samples.append(speed)
+                if len(self._speed_samples) > 15:  # Rolling average of ~30 seconds
+                    self._speed_samples.pop(0)
+                
+                self._last_update_time = now
+                self._last_files_scanned = stats.files_scanned
+                
+                # Calculate ETA based on recent speed
+                avg_speed = sum(self._speed_samples) / len(self._speed_samples)
+                if avg_speed > 0.05: # At least 1 file every 20 seconds to prevent crazy ETAs
+                    remaining_files = stats.total_files_found - stats.files_scanned
+                    remaining_seconds = remaining_files / avg_speed
+                    
+                    if remaining_seconds < 60:
+                        self._eta_str = f" • ~{int(remaining_seconds)}s restantes"
+                    elif remaining_seconds < 3600:
+                        self._eta_str = f" • ~{int(remaining_seconds // 60)}m restantes"
+                    else:
+                        h = int(remaining_seconds // 3600)
+                        m = int((remaining_seconds % 3600) // 60)
+                        self._eta_str = f" • ~{h}h {m}m restantes"
+                else:
+                    self._eta_str = " • Calculando..."
+                        
+            pct_str = f"{int(pct * 100)}%{self._eta_str}"
         else:
             self.progress_bar.setValue(0)
             pct_str = "0%"

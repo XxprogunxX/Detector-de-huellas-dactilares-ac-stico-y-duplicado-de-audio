@@ -140,7 +140,7 @@ def compare_tracks(track_a: AudioTrack, track_b: AudioTrack) -> ComparisonResult
     similarity, offset = compare_raw_fingerprints(track_a.fingerprint_raw, track_b.fingerprint_raw)
 
     # 5. Classification Rules
-    if similarity >= 0.94 and duration_diff <= 3.5:
+    if similarity >= 0.98 and duration_diff <= 2.0:
         return ComparisonResult(
             track_a_path=track_a.filepath,
             track_b_path=track_b.filepath,
@@ -149,10 +149,10 @@ def compare_tracks(track_a: AudioTrack, track_b: AudioTrack) -> ComparisonResult
             duration_diff=duration_diff,
             reason=f"Duplicado Acústico ({similarity*100:.1f}%): Misma grabación original en diferente formato/bitrate/volumen."
         )
-    elif similarity >= 0.78:
+    elif similarity >= 0.80:
         # Possible variations: Remaster, Radio Edit, Live, Extended
-        sub_reason = "Posible Duplicado: "
-        if duration_diff > 3.5:
+        sub_reason = "Posible Duplicado (Variante): "
+        if duration_diff > 2.0:
             sub_reason += f"Variación de duración (Δ{duration_diff:.1f}s - posible radio edit / versión extendida / directo)."
         else:
             sub_reason += "Variación acústica (posible remasterización o edición con diferente ecualización/compresión)."
