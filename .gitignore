@@ -1,0 +1,23 @@
+# Entorno virtual y temporales de Python
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+venv/
+env/
+.venv/
+
+# Bases de datos y archivos locales generados
+*.db
+*.sqlite
+*.sqlite3
+music_fingerprints.db
+
+# Binarios / dependencias locales pesadas si aplica
+bin/
+*.exe
+
+# Archivos de configuración de IDEs
+.idea/
+.vscode/
+.DS_Store
