@@ -13,26 +13,35 @@ from typing import List, Tuple, Optional
 
 
 def get_fpcalc_path() -> str:
-    """Find local fpcalc binary or fallback to PATH."""
-    # Check bundled bin folder
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(current_dir)
-    bundled_bin = os.path.join(project_root, "bin", "fpcalc.exe" if sys.platform == "win32" else "fpcalc")
-    if os.path.isfile(bundled_bin) and os.access(bundled_bin, os.X_OK):
-        return bundled_bin
-    
-    # Check relative to working directory
-    local_bin = os.path.join(os.getcwd(), "bin", "fpcalc.exe" if sys.platform == "win32" else "fpcalc")
-    if os.path.isfile(local_bin) and os.access(local_bin, os.X_OK):
-        return local_bin
+    """Find local fpcalc binary or fallback to PATH, with support for PyInstaller bundles."""
+    # 1. Check PyInstaller temp directory (_MEIPASS)
+    if hasattr(sys, "_MEIPASS"):
+        meipass_bin = os.path.join(sys._MEIPASS, "bin", "fpcalc.exe" if sys.platform == "win32" else "fpcalc")
+        if os.path.isfile(meipass_bin):
+            return meipass_bin
+        meipass_root_bin = os.path.join(sys._MEIPASS, "fpcalc.exe" if sys.platform == "win32" else "fpcalc")
+        if os.path.isfile(meipass_root_bin):
+            return meipass_root_bin
 
-    # Check system PATH
+    # 2. Check directory where executable/script is located
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
+    candidates = [
+        os.path.join(exe_dir, "bin", "fpcalc.exe" if sys.platform == "win32" else "fpcalc"),
+        os.path.join(exe_dir, "fpcalc.exe" if sys.platform == "win32" else "fpcalc"),
+        os.path.join(os.path.dirname(exe_dir), "bin", "fpcalc.exe" if sys.platform == "win32" else "fpcalc"),
+        os.path.join(os.getcwd(), "bin", "fpcalc.exe" if sys.platform == "win32" else "fpcalc")
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+
+    # 3. Check system PATH
     import shutil
     sys_fpcalc = shutil.which("fpcalc")
     if sys_fpcalc:
         return sys_fpcalc
         
-    return bundled_bin
+    return candidates[0]
 
 
 def compute_file_sha256(filepath: str, block_size: int = 65536) -> str:

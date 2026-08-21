@@ -14,7 +14,9 @@ env/
 music_fingerprints.db
 
 # Binarios / dependencias locales pesadas si aplica
-bin/
+# Compilaciones y ejecutables empaquetados
+build/
+dist/
 *.exe
 
 # Archivos de configuración de IDEs

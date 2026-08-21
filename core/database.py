@@ -13,11 +13,23 @@ from core.fingerprint import compress_fingerprint, decompress_fingerprint
 DEFAULT_DB_NAME = "music_fingerprints.db"
 
 
+def get_default_db_path() -> str:
+    """Returns safe database location in user's AppData or project directory."""
+    if os.name == "nt":
+        app_data = os.environ.get("APPDATA")
+        if app_data:
+            data_dir = os.path.join(app_data, "AudioDuplicateDetector")
+            os.makedirs(data_dir, exist_ok=True)
+            return os.path.join(data_dir, DEFAULT_DB_NAME)
+    
+    app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(app_dir, DEFAULT_DB_NAME)
+
+
 class Database:
     def __init__(self, db_path: Optional[str] = None):
         if not db_path:
-            app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            self.db_path = os.path.join(app_dir, DEFAULT_DB_NAME)
+            self.db_path = get_default_db_path()
         else:
             self.db_path = db_path
 
