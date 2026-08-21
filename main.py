@@ -6,10 +6,14 @@ Main entrypoint supporting both Modern Desktop GUI and Headless CLI modes.
 import os
 import sys
 import argparse
+import multiprocessing
 from typing import Optional
 
 
 def main():
+    # Crucial for Windows PyInstaller executables using multiprocessing / ProcessPoolExecutor
+    multiprocessing.freeze_support()
+
     parser = argparse.ArgumentParser(
         description="Analizador de bibliotecas de música y detector de duplicados acústicos."
     )
