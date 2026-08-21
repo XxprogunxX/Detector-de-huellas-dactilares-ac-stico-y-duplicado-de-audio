@@ -10,9 +10,15 @@ datas = [
     ('bin/fpcalc.exe', 'bin') if os.path.exists('bin/fpcalc.exe') else ('bin', 'bin'),
 ]
 
-# Hidden imports that PyInstaller might miss with PySide6/QtMultimedia
+# Hidden imports that PyInstaller might miss with PyQt6
 hiddenimports = [
-    'tkinter',
+    'PyQt6',
+    'PyQt6.QtCore',
+    'PyQt6.QtGui',
+    'PyQt6.QtWidgets',
+    'PyQt6.QtMultimedia',
+    'PyQt6.QtMultimediaWidgets',
+    'qtawesome',
     'mutagen',
     'mutagen.mp3',
     'mutagen.flac',
@@ -39,7 +45,7 @@ a = Analysis(
         'cv2', 'PIL', 'Pillow',
         'pandas', 'scipy.spatial.transform',
         'matplotlib', 'tkinter', 'test', 'unittest',
-        'PyQt5', 'PyQt6',
+        'PyQt5', 'PySide2', 'PySide6',
         'IPython', 'jupyter', 'notebook',
         'sklearn', 'scikit-learn',
         'pygame', 'yt_dlp', 'grpc', 'h5py'
