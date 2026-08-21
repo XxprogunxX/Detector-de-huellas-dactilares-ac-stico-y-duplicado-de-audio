@@ -12,11 +12,7 @@ datas = [
 
 # Hidden imports that PyInstaller might miss with PySide6/QtMultimedia
 hiddenimports = [
-    'PySide6.QtCore',
-    'PySide6.QtGui',
-    'PySide6.QtWidgets',
-    'PySide6.QtMultimedia',
-    'PySide6.QtMultimediaWidgets',
+    'tkinter',
     'mutagen',
     'mutagen.mp3',
     'mutagen.flac',
@@ -25,6 +21,7 @@ hiddenimports = [
     'mutagen.wave',
     'numpy',
     'scipy',
+    'rich',
 ]
 
 a = Analysis(
@@ -36,7 +33,17 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['tkinter', 'matplotlib', 'test', 'unittest'],
+    excludes=[
+        'torch', 'torchvision', 'torchaudio',
+        'tensorflow', 'tensorboard', 'keras',
+        'cv2', 'PIL', 'Pillow',
+        'pandas', 'scipy.spatial.transform',
+        'matplotlib', 'tkinter', 'test', 'unittest',
+        'PyQt5', 'PyQt6',
+        'IPython', 'jupyter', 'notebook',
+        'sklearn', 'scikit-learn',
+        'pygame', 'yt_dlp', 'grpc', 'h5py'
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
