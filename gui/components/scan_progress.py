@@ -118,19 +118,61 @@ class ScanProgressWidget(QFrame):
         if not hasattr(self, '_speed_samples'):
             self._speed_samples = []
             self._last_update_time = time.time()
-            self._last_files_scanned = stats.files_scanned
+            self._last_unit_scanned = 0
+            self._current_tracking_mode = "files"
+
+        # Determine current tracking mode (files vs acoustic comparisons)
+        is_comparing = stats.comparison_total > 0 and stats.progress_ratio is not None
+        tracking_mode = "comparisons" if is_comparing else "files"
+
+        if tracking_mode != self._current_tracking_mode:
+            self._speed_samples = []
+            self._last_update_time = time.time()
+            self._last_unit_scanned = stats.comparison_current if is_comparing else stats.files_scanned
+            self._current_tracking_mode = tracking_mode
+            self._eta_str = ""
 
         # Progress value and ETA
-        if stats.total_files_found > 0:
+        now = time.time()
+        dt = now - self._last_update_time
+
+        if is_comparing:
+            pct = stats.progress_ratio if stats.progress_ratio is not None else (stats.comparison_current / max(1, stats.comparison_total))
+            self.progress_bar.setValue(int(pct * 100))
+
+            if dt >= 1.5 and stats.is_running and not stats.is_paused:
+                d_units = stats.comparison_current - self._last_unit_scanned
+                speed = d_units / max(0.001, dt)
+                self._speed_samples.append(speed)
+                if len(self._speed_samples) > 10:
+                    self._speed_samples.pop(0)
+
+                self._last_update_time = now
+                self._last_unit_scanned = stats.comparison_current
+
+                avg_speed = sum(self._speed_samples) / len(self._speed_samples)
+                if avg_speed > 1.0:
+                    rem_units = max(0, stats.comparison_total - stats.comparison_current)
+                    rem_secs = rem_units / avg_speed
+                    if rem_secs < 60:
+                        self._eta_str = f" • ~{int(rem_secs)}s restantes"
+                    elif rem_secs < 3600:
+                        self._eta_str = f" • ~{int(rem_secs // 60)}m restantes"
+                    else:
+                        h = int(rem_secs // 3600)
+                        m = int((rem_secs % 3600) // 60)
+                        self._eta_str = f" • ~{h}h {m}m restantes"
+                else:
+                    self._eta_str = " • Calculando..."
+
+            pct_str = f"{int(pct * 100)}%{self._eta_str}"
+        elif stats.total_files_found > 0:
             pct = stats.files_scanned / stats.total_files_found
             self.progress_bar.setValue(int(pct * 100))
-            
-            now = time.time()
-            dt = now - self._last_update_time
-            
+
             # Update speed every ~2 seconds
             if dt >= 2.0 and stats.is_running and not stats.is_paused:
-                d_files = stats.files_scanned - self._last_files_scanned
+                d_files = stats.files_scanned - self._last_unit_scanned
                 speed = d_files / dt
                 
                 self._speed_samples.append(speed)
@@ -138,11 +180,11 @@ class ScanProgressWidget(QFrame):
                     self._speed_samples.pop(0)
                 
                 self._last_update_time = now
-                self._last_files_scanned = stats.files_scanned
+                self._last_unit_scanned = stats.files_scanned
                 
                 # Calculate ETA based on recent speed
                 avg_speed = sum(self._speed_samples) / len(self._speed_samples)
-                if avg_speed > 0.05: # At least 1 file every 20 seconds to prevent crazy ETAs
+                if avg_speed > 0.05:
                     remaining_files = stats.total_files_found - stats.files_scanned
                     remaining_seconds = remaining_files / avg_speed
                     

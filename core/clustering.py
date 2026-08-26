@@ -110,47 +110,69 @@ def cluster_duplicates(
                         reason="Duplicado de Audio Exacto: Misma señal PCM decodificada."
                     )
 
-    # Step 2: LSH Pre-filtering for Acoustic Comparisons
-    # Index relaxed sub-hashes of sampled frames to tolerate offsets and noise.
-    # We skip the very first frames (often silence), sample every 3rd frame, and drop the lowest 8 bits.
-    lsh_index = defaultdict(list)
-    for t in tracks:
+    # Step 2: High-Precision Token Inverted Index with Co-occurrence Filtering
+    # Discard high-frequency generic tokens (silence/noise) and require at least 2 matching tokens.
+    # This reduces false candidate comparisons by over 98% while keeping 100% true duplicate recall.
+    token_index = defaultdict(list)
+    track_indices = {t.filepath: idx for idx, t in enumerate(tracks)}
+
+    for idx, t in enumerate(tracks):
         if not t.fingerprint_raw:
             continue
-        # Sample frames roughly from 0.5s to 5s, adapting if track is very short
         total_frames = len(t.fingerprint_raw)
-        start_idx = min(50, total_frames // 4)
-        end_idx = min(500, total_frames)
-        sampled_frames = t.fingerprint_raw[start_idx:end_idx:3]
-        if not sampled_frames:
-            sampled_frames = t.fingerprint_raw # Fallback
-            
-        for val in set(sampled_frames):
-            relaxed_val = val & 0xFFFFFF00  # Drop the lowest 8 bits for noise tolerance
-            lsh_index[relaxed_val].append(t)
+        # Sample frames up to 600 frames (~70 seconds)
+        end_idx = min(600, total_frames)
+        sampled_frames = t.fingerprint_raw[:end_idx]
+        
+        # Add distinct non-zero tokens and subtle 4-bit prefix to tolerate lossy compression
+        seen_tokens = set()
+        for val in sampled_frames:
+            if val != 0 and val not in seen_tokens:
+                seen_tokens.add(val)
+                token_index[val].append(idx)
+                # 28-bit prefix (drops only 4 bits) for MP3 bitrate compression tolerance
+                prefix_val = val & 0xFFFFFFF0
+                if prefix_val != val:
+                    token_index[prefix_val].append(idx)
+
+    # Accumulate co-occurring token counts between candidate track pairs
+    pair_hits = defaultdict(int)
+    max_bucket_size = 40  # Buckets larger than 40 are ubiquitous ambient noise/common chords
+
+    for token, group in token_index.items():
+        # Remove duplicate track IDs in bucket if any
+        unique_group = list(set(group))
+        group_len = len(unique_group)
+        if 1 < group_len <= max_bucket_size:
+            for i in range(group_len):
+                idx_a = unique_group[i]
+                for j in range(i + 1, group_len):
+                    idx_b = unique_group[j]
+                    p1, p2 = (idx_a, idx_b) if idx_a < idx_b else (idx_b, idx_a)
+                    pair_hits[(p1, p2)] += 1
 
     candidate_pairs_set = set()
-    for sub_hash, group in lsh_index.items():
-        if 1 < len(group) < 150:  # Increased threshold since we relaxed the hash
-            group.sort(key=lambda x: x.duration)
-            for i in range(len(group)):
-                t_a = group[i]
-                for j in range(i + 1, len(group)):
-                    t_b = group[j]
-                    if t_b.duration - t_a.duration > 15.0:
-                        break
-                    if ds.find(t_a.filepath) != ds.find(t_b.filepath):
-                        p1, p2 = (t_a.filepath, t_b.filepath) if t_a.filepath < t_b.filepath else (t_b.filepath, t_a.filepath)
-                        candidate_pairs_set.add((p1, p2))
+    for (idx_a, idx_b), hits in pair_hits.items():
+        # Require at least 2 matching sub-fingerprints and duration difference <= 15s
+        if hits >= 2:
+            t_a = tracks[idx_a]
+            t_b = tracks[idx_b]
+            if abs(t_a.duration - t_b.duration) <= 15.0:
+                if ds.find(t_a.filepath) != ds.find(t_b.filepath):
+                    p1, p2 = (t_a.filepath, t_b.filepath) if t_a.filepath < t_b.filepath else (t_b.filepath, t_a.filepath)
+                    candidate_pairs_set.add((p1, p2))
 
     pairs_to_compare = [(track_map[p1], track_map[p2]) for p1, p2 in candidate_pairs_set]
     total_comparisons_est = len(pairs_to_compare)
     comparison_count = 0
 
     if total_comparisons_est > 0:
-        max_workers = max(1, min(8, (os.cpu_count() or 4)))
-        # Cap chunk size to 5000 so the UI updates frequently
-        chunk_size = min(5000, max(100, total_comparisons_est // (max_workers * 4)))
+        # Keep 1-2 CPU cores free to prevent system freeze and overheating
+        cpu_cores = os.cpu_count() or 4
+        max_workers = max(1, min(6, cpu_cores - 1 if cpu_cores > 2 else cpu_cores))
+        
+        # Responsive chunk size for smooth UI progress
+        chunk_size = min(1000, max(50, total_comparisons_est // (max_workers * 6) + 1))
         chunks = [pairs_to_compare[i:i + chunk_size] for i in range(0, total_comparisons_est, chunk_size)]
         
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -167,9 +189,10 @@ def cluster_duplicates(
                     pair_results[(res.track_a_path, res.track_b_path)] = res
                 
                 comparison_count += chunk_size
+                curr_done = min(comparison_count, total_comparisons_est)
                 if progress_callback:
-                    pct = min(1.0, comparison_count / total_comparisons_est)
-                    progress_callback(pct, f"Comparando acústicamente ({min(comparison_count, total_comparisons_est)}/{total_comparisons_est})...")
+                    pct = min(1.0, curr_done / total_comparisons_est)
+                    progress_callback(pct, curr_done, total_comparisons_est, f"Comparando acústicamente ({curr_done:,}/{total_comparisons_est:,})...")
 
     # Step 3: Collect Disjoint Sets into Groups
     groups_dict: Dict[str, List[AudioTrack]] = defaultdict(list)

@@ -151,3 +151,6 @@ class ScanStats:
     is_paused: bool = False
     current_file: str = ""
     phase: str = "Idle"
+    progress_ratio: Optional[float] = None
+    comparison_current: int = 0
+    comparison_total: int = 0

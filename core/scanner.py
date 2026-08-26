@@ -87,7 +87,9 @@ def _process_audio_worker(filepath: str) -> Optional[Dict[str, Any]]:
 class AudioScanner:
     def __init__(self, db: Optional[Database] = None, max_workers: Optional[int] = None):
         self.db = db or Database()
-        self.max_workers = max_workers or max(1, min(8, os.cpu_count() or 4))
+        cpu_cores = os.cpu_count() or 4
+        # Leave 1-2 cores free so OS/GUI stays smooth and prevents laptop overheating
+        self.max_workers = max_workers or max(1, min(6, cpu_cores - 1 if cpu_cores > 2 else cpu_cores))
         self.stats = ScanStats()
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
@@ -280,8 +282,12 @@ class AudioScanner:
         if progress_callback:
             progress_callback(self.stats)
 
-        def clustering_progress(pct, msg):
+        def clustering_progress(pct, curr_comp, tot_comp, msg):
             self.stats.phase = msg
+            self.stats.progress_ratio = pct
+            self.stats.comparison_current = curr_comp
+            self.stats.comparison_total = tot_comp
+            self.stats.elapsed_seconds = time.time() - start_time
             if progress_callback:
                 progress_callback(self.stats)
 
@@ -292,6 +298,7 @@ class AudioScanner:
         )
 
         # 5. Summarize Statistics
+        self.stats.progress_ratio = 1.0
         self.stats.total_groups_count = len(groups)
         self.stats.exact_duplicates_count = sum(1 for g in groups if g.primary_type in (DuplicateType.EXACT_HASH, DuplicateType.EXACT_AUDIO))
         self.stats.acoustic_duplicates_count = sum(1 for g in groups if g.primary_type == DuplicateType.ACOUSTIC_DUPLICATE)
