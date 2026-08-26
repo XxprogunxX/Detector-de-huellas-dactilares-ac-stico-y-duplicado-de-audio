@@ -64,7 +64,7 @@ def _process_audio_worker(filepath: str) -> Optional[Dict[str, Any]]:
             "filesize": filesize,
             "mtime": mtime,
             "sha256": sha256,
-            "audio_hash": "",
+            "audio_hash": compute_audio_pcm_hash(filepath),
             "duration": duration,
             "format": meta.get("format", ""),
             "bitrate": meta.get("bitrate", 0),
@@ -152,8 +152,10 @@ class AudioScanner:
         tracks_to_process: List[str] = []
         all_tracks: List[AudioTrack] = []
         
-        cached_map = self.db.get_all_cached_lookup()
+        cached_map = self.db.get_lightweight_cache_lookup()
         total_discovered = len(discovered_files)
+
+        cached_paths_to_load: List[str] = []
 
         for idx, fpath in enumerate(discovered_files, start=1):
             if self._stop_event.is_set():
@@ -161,8 +163,8 @@ class AudioScanner:
             try:
                 stat = os.stat(fpath)
                 cached = cached_map.get(fpath)
-                if cached and cached.filesize == stat.st_size and abs(cached.mtime - stat.st_mtime) < 0.001:
-                    all_tracks.append(cached)
+                if cached and cached[0] == stat.st_size and abs(cached[1] - stat.st_mtime) < 0.001:
+                    cached_paths_to_load.append(fpath)
                     self.stats.files_from_cache += 1
                     self.stats.files_scanned += 1
                 else:
@@ -250,7 +252,7 @@ class AudioScanner:
                             pass
 
                         # Periodic batch save to database
-                        if len(batch_save) >= 30:
+                        if len(batch_save) >= 200:
                             self.db.upsert_tracks_batch(batch_save)
                             batch_save.clear()
 
@@ -266,6 +268,13 @@ class AudioScanner:
         if self._stop_event.is_set():
             self.stats.is_running = False
             return []
+
+        self.stats.phase = "Cargando caché para agrupar..."
+        if progress_callback:
+            progress_callback(self.stats)
+            
+        # Lazy load all valid cached tracks
+        all_tracks.extend(self.db.get_tracks_for_files(cached_paths_to_load))
 
         self.stats.phase = "Agrupando duplicados..."
         if progress_callback:

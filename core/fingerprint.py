@@ -66,14 +66,17 @@ def compute_audio_pcm_hash(filepath: str, sample_rate: int = 11025) -> str:
             "-"
         ]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        hasher = hashlib.md5()
-        while True:
-            chunk = proc.stdout.read(65536)
-            if not chunk:
-                break
-            hasher.update(chunk)
-        proc.wait()
-        return hasher.hexdigest()
+        try:
+            stdout, _ = proc.communicate(timeout=30.0)
+            if not stdout:
+                return ""
+            hasher = hashlib.md5()
+            hasher.update(stdout)
+            return hasher.hexdigest()
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return ""
     except Exception:
         return ""
 
@@ -116,14 +119,18 @@ def extract_fingerprint(
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = 0
 
-    proc = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        startupinfo=startupinfo,
-        encoding="utf-8",
-        errors="replace"
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            startupinfo=startupinfo,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30.0
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"fpcalc timeout expired after 30.0 seconds for file: {filepath}")
 
     if proc.returncode != 0:
         raise RuntimeError(f"fpcalc failed with code {proc.returncode}: {proc.stderr.strip()}")

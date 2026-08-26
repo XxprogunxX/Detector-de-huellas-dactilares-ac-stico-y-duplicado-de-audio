@@ -102,6 +102,16 @@ class Database:
                 lookup[t.filepath] = t
         return lookup
 
+    def get_lightweight_cache_lookup(self) -> Dict[str, tuple]:
+        """Returns a fast lookup dict of (filesize, mtime) indexed by filepath, avoiding full load."""
+        lookup = {}
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT filepath, filesize, mtime FROM tracks")
+            for row in cursor.fetchall():
+                lookup[row[0]] = (row[1], row[2])
+        return lookup
+
     def get_track_by_cache(self, filepath: str, filesize: int, mtime: float) -> Optional[AudioTrack]:
         """Returns cached AudioTrack if file size and modified time match exactly."""
         with self._get_connection() as conn:

@@ -111,18 +111,27 @@ def cluster_duplicates(
                     )
 
     # Step 2: LSH Pre-filtering for Acoustic Comparisons
-    # Index exact 32-bit values of the first 100 frames. 
-    # This reduces candidate pairs from 30,000,000 down to a few thousand.
+    # Index relaxed sub-hashes of sampled frames to tolerate offsets and noise.
+    # We skip the very first frames (often silence), sample every 3rd frame, and drop the lowest 8 bits.
     lsh_index = defaultdict(list)
     for t in tracks:
         if not t.fingerprint_raw:
             continue
-        for val in set(t.fingerprint_raw[:100]):
-            lsh_index[val].append(t)
+        # Sample frames roughly from 0.5s to 5s, adapting if track is very short
+        total_frames = len(t.fingerprint_raw)
+        start_idx = min(50, total_frames // 4)
+        end_idx = min(500, total_frames)
+        sampled_frames = t.fingerprint_raw[start_idx:end_idx:3]
+        if not sampled_frames:
+            sampled_frames = t.fingerprint_raw # Fallback
+            
+        for val in set(sampled_frames):
+            relaxed_val = val & 0xFFFFFF00  # Drop the lowest 8 bits for noise tolerance
+            lsh_index[relaxed_val].append(t)
 
     candidate_pairs_set = set()
     for sub_hash, group in lsh_index.items():
-        if 1 < len(group) < 50:  # If more than 50 share the exact same frame, it's likely silence/noise
+        if 1 < len(group) < 150:  # Increased threshold since we relaxed the hash
             group.sort(key=lambda x: x.duration)
             for i in range(len(group)):
                 t_a = group[i]

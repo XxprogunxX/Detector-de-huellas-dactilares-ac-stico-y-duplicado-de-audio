@@ -38,8 +38,12 @@ def estimate_spectral_cutoff(filepath: str, sample_rate: int = 44100, duration_p
             startupinfo.wShowWindow = 0
 
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, startupinfo=startupinfo)
-        raw_bytes = proc.stdout.read()
-        proc.wait()
+        try:
+            raw_bytes, _ = proc.communicate(timeout=20.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raw_bytes = b""
 
         if len(raw_bytes) < sample_rate * 2:
             return 22050.0 if is_lossless_container else 20000.0, 0.0

@@ -25,6 +25,18 @@ class TestClustering(unittest.TestCase):
         self.assertEqual(len(groups[0].tracks), 2)
         self.assertEqual(groups[0].primary_type, DuplicateType.EXACT_HASH)
 
+    def test_lsh_false_positive_rejection(self):
+        # Force LSH collision with identical initial frames, but rest is totally different
+        fp1 = [0xABCDABCD] * 100 + [0xFFFFFFFF] * 400
+        fp2 = [0xABCDABCD] * 100 + [0x00000000] * 400
+
+        t1 = AudioTrack(filepath="path/song1.mp3", duration=200.0, fingerprint_raw=fp1)
+        t2 = AudioTrack(filepath="path/song2.mp3", duration=200.0, fingerprint_raw=fp2)
+
+        groups = cluster_duplicates([t1, t2])
+        # Even though LSH puts them in the same bucket, compare_fingerprints should reject them
+        self.assertEqual(len(groups), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
