@@ -9,11 +9,11 @@ from typing import List, Optional
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QScrollArea, QFileDialog, QMessageBox, QApplication,
-    QFrame, QSizePolicy
+    QFrame, QSizePolicy, QDialog
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
-from core.models import DuplicateGroup, DuplicateType, ScanStats
+from core.models import DuplicateGroup, DuplicateType, ScanStats, FileAction
 from core.scanner import AudioScanner
 from core.database import Database
 from core.file_manager import (
@@ -28,6 +28,7 @@ from gui.components.audio_player import AudioPlayer
 from gui.components.sidebar import Sidebar
 from gui.components.stats_bar import StatsBar
 from gui.components.bottom_player import BottomPlayerBar
+from gui.components.delete_modal import DeleteModal
 from gui.styles import COLORS, GLOBAL_QSS
 
 import qtawesome as qta
@@ -413,19 +414,24 @@ class AudioDuplicateDetectorApp(QMainWindow):
         self._refresh_view()
 
     def _handle_delete_duplicates(self):
-        reply = QMessageBox.question(
-            self, "Confirmar Eliminación",
-            "¿Estás seguro de que deseas ELIMINAR PERMANENTEMENTE los archivos marcados?\n"
-            "Esta acción no se puede deshacer.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            success, failed, logs = delete_marked_duplicates_permanently(self.filtered_groups)
-            msg = f"Archivos eliminados: {success}"
+        marked = [
+            t for g in self.filtered_groups for t in g.tracks
+            if t.action == FileAction.DELETE
+        ]
+        if not marked:
+            QMessageBox.information(
+                self, "Sin archivos seleccionados",
+                "Marca al menos un archivo como ELIMINAR antes de continuar."
+            )
+            return
+
+        modal = DeleteModal(self.filtered_groups, parent=self)
+        if modal.exec() == QDialog.DialogCode.Accepted:
+            success, failed, logs = modal.execute_action()
+            msg = f"Archivos procesados: {success}"
             if failed:
-                msg += f"\nErrores al eliminar: {failed}"
-            QMessageBox.information(self, "Eliminación Completada", msg)
+                msg += f"\nErrores: {failed}"
+            QMessageBox.information(self, "Acción completada", msg)
             self._refresh_view()
 
 

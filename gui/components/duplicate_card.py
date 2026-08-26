@@ -12,6 +12,7 @@ from PyQt6.QtCore import Qt
 from core.models import DuplicateGroup, AudioTrack, DuplicateType, FileAction
 from core.file_manager import open_file_in_explorer
 from gui.components.audio_player import AudioPlayer
+from gui.components.ab_comparison import ABComparisonDialog
 from gui.styles import COLORS
 import qtawesome as qta
 
@@ -85,6 +86,17 @@ class DuplicateGroupCard(QFrame):
         lbl_savings = QLabel(f"Ahorro: {savings_mb:.1f} MB")
         lbl_savings.setStyleSheet(f"color: {COLORS['success']}; font-weight: bold; font-size: 9pt;")
         h_layout.addWidget(lbl_savings)
+
+        # Compare A/B button (only when there are exactly 2 tracks)
+        if len(self.group.tracks) == 2:
+            btn_ab = QPushButton(" A/B")
+            btn_ab.setObjectName("ghost")
+            btn_ab.setIcon(qta.icon("fa5s.columns", color=COLORS["cyan"]))
+            btn_ab.setFixedHeight(26)
+            btn_ab.setToolTip("Comparación espectral A vs B")
+            btn_ab.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_ab.clicked.connect(self._open_ab_comparison)
+            h_layout.addWidget(btn_ab)
 
         main_layout.addWidget(header)
 
@@ -288,10 +300,20 @@ class DuplicateGroupCard(QFrame):
             track.action = FileAction.KEEP
             btn.setText("CONSERVAR")
             btn.setObjectName("success")
-            
+
         # Re-apply stylesheet to force color change from objectName
         btn.setStyleSheet("")
 
         self.group.recalculate_space_saving()
         if self.on_action_changed:
             self.on_action_changed(self.group)
+
+    def _open_ab_comparison(self):
+        if len(self.group.tracks) >= 2:
+            dlg = ABComparisonDialog(
+                track_a=self.group.tracks[0],
+                track_b=self.group.tracks[1],
+                best_path=self.group.best_track_path,
+                parent=self.window()
+            )
+            dlg.exec()
