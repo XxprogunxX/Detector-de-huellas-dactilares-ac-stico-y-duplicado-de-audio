@@ -17,7 +17,7 @@ class TestQualityAnalyzer(unittest.TestCase):
             bit_depth=16,
             is_lossless=True,
             spectral_cutoff=22050.0,
-            is_fake_lossless=False
+            fake_lossless_confidence=0.0
         )
         evaluate_track_quality(flac_track)
 
@@ -29,7 +29,7 @@ class TestQualityAnalyzer(unittest.TestCase):
             bit_depth=16,
             is_lossless=False,
             spectral_cutoff=20000.0,
-            is_fake_lossless=False
+            fake_lossless_confidence=0.0
         )
         evaluate_track_quality(mp3_track)
 
@@ -45,7 +45,7 @@ class TestQualityAnalyzer(unittest.TestCase):
             bit_depth=16,
             is_lossless=True,
             spectral_cutoff=15800.0,
-            is_fake_lossless=True
+            fake_lossless_confidence=85.0
         )
         evaluate_track_quality(fake_flac)
 
@@ -57,13 +57,13 @@ class TestQualityAnalyzer(unittest.TestCase):
             bit_depth=16,
             is_lossless=False,
             spectral_cutoff=20000.0,
-            is_fake_lossless=False
+            fake_lossless_confidence=0.0
         )
         evaluate_track_quality(mp3_320)
 
         # Genuine MP3 320k MUST score higher than a fake FLAC transcoded from 128k MP3
         self.assertGreater(mp3_320.quality_score, fake_flac.quality_score)
-        self.assertIn("Falso Lossless", fake_flac.quality_details)
+        self.assertIn("⚠️ Posible Transcodificación", fake_flac.quality_details)
 
 
 if __name__ == "__main__":

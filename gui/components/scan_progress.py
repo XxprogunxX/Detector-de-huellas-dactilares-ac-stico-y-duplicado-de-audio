@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar
 )
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont
 from core.models import ScanStats
 from gui.styles import COLORS
 import qtawesome as qta
@@ -20,74 +21,88 @@ class ScanProgressWidget(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName("transparent")  # Uses the generic background
+        self.setObjectName("transparent")
         self._eta_str = ""
         self._build_ui()
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setContentsMargins(0, 0, 0, 16)
+        main_layout.setSpacing(10)
 
-        # Top row: Status message and Action buttons
+        # ── Header row: phase + buttons ────────────────────────────
         top_frame = QFrame()
         top_frame.setObjectName("transparent")
         top_layout = QHBoxLayout(top_frame)
-        top_layout.setContentsMargins(16, 14, 16, 8)
+        top_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.lbl_status = QLabel("Listo para escanear.")
-        self.lbl_status.setObjectName("subtitle")
+        self.lbl_status = QLabel("ESCANEANDO BIBLIOTECA...")
+        self.lbl_status.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self.lbl_status.setStyleSheet(f"color: {COLORS['text_main']};")
         top_layout.addWidget(self.lbl_status, stretch=1)
 
         self.btn_pause = QPushButton(" Pausar")
-        self.btn_pause.setIcon(qta.icon("fa5s.pause", color="white"))
-        self.btn_pause.setObjectName("warning")
-        self.btn_pause.setFixedSize(110, 30)
+        self.btn_pause.setIcon(qta.icon("fa5s.pause", color=COLORS["text_muted"]))
+        self.btn_pause.setObjectName("ghost")
+        self.btn_pause.setFixedSize(120, 32)
         self.btn_pause.clicked.connect(self._toggle_pause)
         top_layout.addWidget(self.btn_pause)
 
-        self.btn_cancel = QPushButton(" Detener")
-        self.btn_cancel.setIcon(qta.icon("fa5s.stop", color="white"))
-        self.btn_cancel.setObjectName("danger")
-        self.btn_cancel.setFixedSize(110, 30)
+        self.btn_cancel = QPushButton(" Cancelar")
+        self.btn_cancel.setIcon(qta.icon("fa5s.times", color=COLORS["danger"]))
+        self.btn_cancel.setObjectName("ghost")
+        self.btn_cancel.setStyleSheet(
+            f"QPushButton#ghost {{ color: {COLORS['danger']}; border-color: {COLORS['danger_bg']}; }}"
+            f"QPushButton#ghost:hover {{ background-color: {COLORS['danger_bg']}; }}"
+        )
+        self.btn_cancel.setFixedSize(120, 32)
         self.btn_cancel.clicked.connect(self.cancel_requested.emit)
         top_layout.addWidget(self.btn_cancel)
 
         main_layout.addWidget(top_frame)
 
-        # Progress bar
+        # ── Progress bar (cyan, full-width) ────────────────────────
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        self.progress_bar.setFixedHeight(14)
+        self.progress_bar.setFixedHeight(6)
         self.progress_bar.setTextVisible(False)
         main_layout.addWidget(self.progress_bar)
 
-        # Current file indicator
-        self.lbl_current_file = QLabel("")
-        self.lbl_current_file.setObjectName("dim")
-        self.lbl_current_file.setWordWrap(True)
-        main_layout.addWidget(self.lbl_current_file)
+        # ── Progress percentage + current file ──────────────────────
+        pct_row = QHBoxLayout()
+        self.lbl_pct = QLabel("0% completado")
+        self.lbl_pct.setObjectName("muted")
+        self.lbl_pct.setFont(QFont("Segoe UI", 9))
 
-        # Stats Cards Grid
+        self.lbl_current_file = QLabel("")
+        self.lbl_current_file.setObjectName("mono")
+        self.lbl_current_file.setAlignment(Qt.AlignmentFlag.AlignRight)
+        pct_row.addWidget(self.lbl_pct)
+        pct_row.addStretch()
+        pct_row.addWidget(self.lbl_current_file)
+        main_layout.addLayout(pct_row)
+
+        # ── Stats Cards ─────────────────────────────────────────────
         self.stats_frame = QFrame()
         self.stats_frame.setObjectName("transparent")
         stats_layout = QHBoxLayout(self.stats_frame)
-        stats_layout.setContentsMargins(16, 0, 16, 14)
+        stats_layout.setContentsMargins(0, 0, 0, 0)
         stats_layout.setSpacing(8)
 
-        self.card_scanned, self.val_scanned = self._create_stat_card("Archivos", "0 / 0", COLORS["primary"])
+        self.card_scanned, self.val_scanned = self._create_stat_card("Archivos", "0 / 0", COLORS["text_main"])
         stats_layout.addWidget(self.card_scanned, stretch=1)
 
-        self.card_exact, self.val_exact = self._create_stat_card("Exactos", "0", COLORS["primary"])
+        self.card_exact, self.val_exact = self._create_stat_card("Exactos", "0", COLORS["cyan"])
         stats_layout.addWidget(self.card_exact, stretch=1)
 
-        self.card_acoustic, self.val_acoustic = self._create_stat_card("Acústicos", "0", COLORS["success"])
+        self.card_acoustic, self.val_acoustic = self._create_stat_card("Acústicos", "0", COLORS["info"])
         stats_layout.addWidget(self.card_acoustic, stretch=1)
 
-        self.card_possible, self.val_possible = self._create_stat_card("Posibles", "0", COLORS["warning"])
+        self.card_possible, self.val_possible = self._create_stat_card("Posibles", "0", COLORS["purple"])
         stats_layout.addWidget(self.card_possible, stretch=1)
 
-        self.card_savings, self.val_savings = self._create_stat_card("Espacio Ahorrable", "0 MB", COLORS["accent"])
+        self.card_savings, self.val_savings = self._create_stat_card("Espacio Ahorrable", "0 MB", COLORS["warning"])
         stats_layout.addWidget(self.card_savings, stretch=1)
 
         main_layout.addWidget(self.stats_frame)
@@ -118,19 +133,61 @@ class ScanProgressWidget(QFrame):
         if not hasattr(self, '_speed_samples'):
             self._speed_samples = []
             self._last_update_time = time.time()
-            self._last_files_scanned = stats.files_scanned
+            self._last_unit_scanned = 0
+            self._current_tracking_mode = "files"
+
+        # Determine current tracking mode (files vs acoustic comparisons)
+        is_comparing = stats.comparison_total > 0 and stats.progress_ratio is not None
+        tracking_mode = "comparisons" if is_comparing else "files"
+
+        if tracking_mode != self._current_tracking_mode:
+            self._speed_samples = []
+            self._last_update_time = time.time()
+            self._last_unit_scanned = stats.comparison_current if is_comparing else stats.files_scanned
+            self._current_tracking_mode = tracking_mode
+            self._eta_str = ""
 
         # Progress value and ETA
-        if stats.total_files_found > 0:
+        now = time.time()
+        dt = now - self._last_update_time
+
+        if is_comparing:
+            pct = stats.progress_ratio if stats.progress_ratio is not None else (stats.comparison_current / max(1, stats.comparison_total))
+            self.progress_bar.setValue(int(pct * 100))
+
+            if dt >= 1.5 and stats.is_running and not stats.is_paused:
+                d_units = stats.comparison_current - self._last_unit_scanned
+                speed = d_units / max(0.001, dt)
+                self._speed_samples.append(speed)
+                if len(self._speed_samples) > 10:
+                    self._speed_samples.pop(0)
+
+                self._last_update_time = now
+                self._last_unit_scanned = stats.comparison_current
+
+                avg_speed = sum(self._speed_samples) / len(self._speed_samples)
+                if avg_speed > 1.0:
+                    rem_units = max(0, stats.comparison_total - stats.comparison_current)
+                    rem_secs = rem_units / avg_speed
+                    if rem_secs < 60:
+                        self._eta_str = f" • ~{int(rem_secs)}s restantes"
+                    elif rem_secs < 3600:
+                        self._eta_str = f" • ~{int(rem_secs // 60)}m restantes"
+                    else:
+                        h = int(rem_secs // 3600)
+                        m = int((rem_secs % 3600) // 60)
+                        self._eta_str = f" • ~{h}h {m}m restantes"
+                else:
+                    self._eta_str = " • Calculando..."
+
+            pct_str = f"{int(pct * 100)}%{self._eta_str}"
+        elif stats.total_files_found > 0:
             pct = stats.files_scanned / stats.total_files_found
             self.progress_bar.setValue(int(pct * 100))
-            
-            now = time.time()
-            dt = now - self._last_update_time
-            
+
             # Update speed every ~2 seconds
             if dt >= 2.0 and stats.is_running and not stats.is_paused:
-                d_files = stats.files_scanned - self._last_files_scanned
+                d_files = stats.files_scanned - self._last_unit_scanned
                 speed = d_files / dt
                 
                 self._speed_samples.append(speed)
@@ -138,11 +195,11 @@ class ScanProgressWidget(QFrame):
                     self._speed_samples.pop(0)
                 
                 self._last_update_time = now
-                self._last_files_scanned = stats.files_scanned
+                self._last_unit_scanned = stats.files_scanned
                 
                 # Calculate ETA based on recent speed
                 avg_speed = sum(self._speed_samples) / len(self._speed_samples)
-                if avg_speed > 0.05: # At least 1 file every 20 seconds to prevent crazy ETAs
+                if avg_speed > 0.05:
                     remaining_files = stats.total_files_found - stats.files_scanned
                     remaining_seconds = remaining_files / avg_speed
                     
@@ -162,9 +219,11 @@ class ScanProgressWidget(QFrame):
             self.progress_bar.setValue(0)
             pct_str = "0%"
 
-        self.lbl_status.setText(f"{stats.phase} ({pct_str})")
+        self.lbl_status.setText(f"{stats.phase}  ({pct_str})")
+        self.lbl_pct.setText(pct_str)
         if stats.current_file:
-            self.lbl_current_file.setText(f"Procesando: {stats.current_file}")
+            short = stats.current_file[:60] + "..." if len(stats.current_file) > 60 else stats.current_file
+            self.lbl_current_file.setText(short)
         else:
             self.lbl_current_file.setText("")
 
@@ -184,14 +243,10 @@ class ScanProgressWidget(QFrame):
         # Update button states
         if stats.is_paused:
             self.btn_pause.setText(" Reanudar")
-            self.btn_pause.setIcon(qta.icon("fa5s.play", color="white"))
-            self.btn_pause.setObjectName("success")
-            self.btn_pause.setStyleSheet("") # Force re-evaluation of QSS
+            self.btn_pause.setIcon(qta.icon("fa5s.play", color=COLORS["cyan"]))
         else:
             self.btn_pause.setText(" Pausar")
-            self.btn_pause.setIcon(qta.icon("fa5s.pause", color="white"))
-            self.btn_pause.setObjectName("warning")
-            self.btn_pause.setStyleSheet("")
+            self.btn_pause.setIcon(qta.icon("fa5s.pause", color=COLORS["text_muted"]))
 
         self.btn_pause.setEnabled(stats.is_running)
         self.btn_cancel.setEnabled(stats.is_running)

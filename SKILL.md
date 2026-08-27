@@ -1,3 +1,8 @@
+---
+name: audio-duplicate-detector
+description: Guía de arquitectura, seguridad, algoritmos y desarrollo para el analizador de duplicados de audio y huellas acústicas.
+---
+
 # Skill: Audio Duplicate & Acoustic Fingerprinting Detector
 
 ## 1. Propósito
@@ -129,6 +134,9 @@ Reglas:
 
 `fpcalc` se considera una dependencia importante del pipeline y el repositorio contempla un binario autónomo en `bin/fpcalc.exe`.
 
+- Ejecutar llamadas a binarios externos (`fpcalc`, `ffmpeg`, `ffprobe`) siempre con **timeouts explícitos** para evitar bloqueos por archivos colgados o problemas de I/O.
+- Aislar el manejo de excepciones ante archivos corruptos, truncados o con metadatos malformados (`MutagenError`, errores de decodificación): registrar advertencia en logs y continuar el escaneo sin abortar el lote.
+
 ## 7. Comparación acústica
 
 `core/comparator.py` debe conservar la distinción entre:
@@ -204,7 +212,7 @@ Al modificarlo:
 - evitar trabajo duplicado;
 - no cargar innecesariamente archivos completos en memoria;
 - conservar Pause/Resume/Cancel;
-- manejar correctamente excepciones de workers;
+- manejar correctamente excepciones de workers, garantizando que un fallo en un archivo individual no detenga el resto del escaneo;
 - evitar condiciones de carrera con la base de datos;
 - medir rendimiento antes y después de optimizaciones importantes.
 
@@ -274,6 +282,10 @@ Los escenarios importantes incluyen:
 - radio edits y pistas truncadas;
 - canciones distintas para validar ausencia de falsos positivos;
 - comportamiento de caché SQLite.
+
+### Buenas prácticas de pruebas:
+- **Audio sintético para pruebas rápidas**: en pruebas unitarias (`test_comparator.py`, `test_quality.py`), priorizar generadores de audio sintético en memoria (ondas sinusoidales generadas programáticamente con `wave`/`numpy`) para mantener los tests rápidos y evitar inflar el repositorio con binarios.
+- **Muestras reales para E2E**: reservar muestras reales de audio únicamente para las pruebas de integración y end-to-end (`test_end_to_end.py`).
 
 Si una modificación afecta varias capas, ejecutar la suite completa en lugar de confiar solamente en una prueba unitaria.
 

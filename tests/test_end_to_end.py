@@ -132,7 +132,7 @@ class TestEndToEndDuplicateDetection(unittest.TestCase):
         # Verify fake FLAC detection
         fake_flac_track = next((t for t in song_a_group.tracks if t.filepath == self.song_a_fake_flac), None)
         if fake_flac_track:
-            self.assertTrue(fake_flac_track.is_fake_lossless, "Fake FLAC upscaled from 128k MP3 should be flagged")
+            self.assertTrue(fake_flac_track.fake_lossless_confidence > 50.0, "Fake FLAC upscaled from 128k MP3 should be flagged")
 
     def test_incremental_scan_cache_speed(self):
         db = Database(db_path=self.db_path)

@@ -110,41 +110,89 @@ def cluster_duplicates(
                         reason="Duplicado de Audio Exacto: Misma señal PCM decodificada."
                     )
 
-    # Step 2: LSH Pre-filtering for Acoustic Comparisons
-    # Index exact 32-bit values of the first 100 frames. 
-    # This reduces candidate pairs from 30,000,000 down to a few thousand.
-    lsh_index = defaultdict(list)
-    for t in tracks:
-        if not t.fingerprint_raw:
+    # Step 2: High-Precision Subfingerprint Index with Duration Bucketing
+    if progress_callback:
+        progress_callback(0.0, 0, 0, "Indexando huellas acústicas...")
+
+    shingle_index = defaultdict(list)
+    for idx, t in enumerate(tracks):
+        fp = t.fingerprint_raw
+        if not fp:
             continue
-        for val in set(t.fingerprint_raw[:100]):
-            lsh_index[val].append(t)
+        dur_bucket = int(t.duration // 5)
+        limit = min(300, len(fp))
+        seen = set()
+        for i in range(limit):
+            val = fp[i]
+            if val != 0:
+                s = (dur_bucket, val)
+                if s not in seen:
+                    seen.add(s)
+                    shingle_index[s].append(idx)
+                # 28-bit prefix for MP3 compression tolerance
+                prefix_val = val & 0xFFFFFFF0
+                if prefix_val != val:
+                    sp = (dur_bucket, prefix_val)
+                    if sp not in seen:
+                        seen.add(sp)
+                        shingle_index[sp].append(idx)
+
+    if progress_callback:
+        progress_callback(0.0, 0, 0, "Filtrando coincidencias acústicas...")
+
+    # Accumulate co-occurring token counts between candidate track pairs
+    pair_hits = defaultdict(int)
+    max_bucket_size = 35
+
+    for s, group in shingle_index.items():
+        unique_group = list(set(group))
+        group_len = len(unique_group)
+        if 1 < group_len <= max_bucket_size:
+            for i in range(group_len):
+                idx_a = unique_group[i]
+                for j in range(i + 1, group_len):
+                    idx_b = unique_group[j]
+                    p1, p2 = (idx_a, idx_b) if idx_a < idx_b else (idx_b, idx_a)
+                    pair_hits[(p1, p2)] += 1
 
     candidate_pairs_set = set()
-    for sub_hash, group in lsh_index.items():
-        if 1 < len(group) < 50:  # If more than 50 share the exact same frame, it's likely silence/noise
-            group.sort(key=lambda x: x.duration)
-            for i in range(len(group)):
-                t_a = group[i]
-                for j in range(i + 1, len(group)):
-                    t_b = group[j]
-                    if t_b.duration - t_a.duration > 15.0:
-                        break
-                    if ds.find(t_a.filepath) != ds.find(t_b.filepath):
-                        p1, p2 = (t_a.filepath, t_b.filepath) if t_a.filepath < t_b.filepath else (t_b.filepath, t_a.filepath)
-                        candidate_pairs_set.add((p1, p2))
+
+    # Cap pair_hits to avoid unbounded memory growth on very large libraries (100k+ tracks)
+    MAX_PAIRS = 500_000
+    if len(pair_hits) > MAX_PAIRS:
+        # Keep the pairs with highest hit count (most likely true duplicates)
+        pair_hits = dict(sorted(pair_hits.items(), key=lambda x: x[1], reverse=True)[:MAX_PAIRS])
+
+    for (idx_a, idx_b), hits in pair_hits.items():
+        t_a = tracks[idx_a]
+        t_b = tracks[idx_b]
+        min_hits = 1 if min(len(t_a.fingerprint_raw), len(t_b.fingerprint_raw)) < 15 else 2
+        if hits >= min_hits and abs(t_a.duration - t_b.duration) <= 8.0:
+            if ds.find(t_a.filepath) != ds.find(t_b.filepath):
+                p1, p2 = (t_a.filepath, t_b.filepath) if t_a.filepath < t_b.filepath else (t_b.filepath, t_a.filepath)
+                candidate_pairs_set.add((p1, p2))
+
 
     pairs_to_compare = [(track_map[p1], track_map[p2]) for p1, p2 in candidate_pairs_set]
     total_comparisons_est = len(pairs_to_compare)
     comparison_count = 0
 
+    if progress_callback:
+        progress_callback(0.0, 0, total_comparisons_est, f"Comparando huellas acústicas (0/{total_comparisons_est:,})...")
+
+
     if total_comparisons_est > 0:
-        max_workers = max(1, min(8, (os.cpu_count() or 4)))
-        # Cap chunk size to 5000 so the UI updates frequently
-        chunk_size = min(5000, max(100, total_comparisons_est // (max_workers * 4)))
+        # Keep 1-2 CPU cores free to prevent system freeze and overheating
+        cpu_cores = os.cpu_count() or 4
+        max_workers = max(1, min(6, cpu_cores - 1 if cpu_cores > 2 else cpu_cores))
+        
+        # Responsive chunk size for smooth UI progress
+        chunk_size = min(1000, max(50, total_comparisons_est // (max_workers * 6) + 1))
         chunks = [pairs_to_compare[i:i + chunk_size] for i in range(0, total_comparisons_est, chunk_size)]
         
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # max_tasks_per_child=200: recycle worker processes periodically to prevent
+        # memory leaks from numpy/ffmpeg accumulated buffers in long-running scans.
+        with ProcessPoolExecutor(max_workers=max_workers, max_tasks_per_child=200) as executor:
             futures = [executor.submit(_compare_chunk_worker, chunk) for chunk in chunks]
             
             for future in as_completed(futures):
@@ -158,9 +206,11 @@ def cluster_duplicates(
                     pair_results[(res.track_a_path, res.track_b_path)] = res
                 
                 comparison_count += chunk_size
+                curr_done = min(comparison_count, total_comparisons_est)
                 if progress_callback:
-                    pct = min(1.0, comparison_count / total_comparisons_est)
-                    progress_callback(pct, f"Comparando acústicamente ({min(comparison_count, total_comparisons_est)}/{total_comparisons_est})...")
+                    pct = min(1.0, curr_done / total_comparisons_est)
+                    progress_callback(pct, curr_done, total_comparisons_est, f"Comparando acústicamente ({curr_done:,}/{total_comparisons_est:,})...")
+
 
     # Step 3: Collect Disjoint Sets into Groups
     groups_dict: Dict[str, List[AudioTrack]] = defaultdict(list)

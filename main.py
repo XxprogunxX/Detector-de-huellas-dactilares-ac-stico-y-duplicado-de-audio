@@ -39,6 +39,17 @@ def main():
         default=None,
         help="Mover automáticamente los duplicados inferiores a la carpeta especificada."
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Mostrar qué sucedería sin mover o eliminar ningún archivo."
+    )
+    parser.add_argument(
+        "--export-csv",
+        type=str,
+        default=None,
+        help="Ruta para exportar los resultados en formato CSV."
+    )
 
     args = parser.parse_args()
 
@@ -108,11 +119,30 @@ def run_cli_mode(args):
         console.print(table)
         console.print(f"[bold yellow]Recomendación:[/] {group.best_track_reason}\n")
 
+    if args.export_csv:
+        import csv
+        with open(args.export_csv, mode="w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Grupo ID", "Tipo Duplicado", "Acción Recomendada", "Ruta Archivo", "Formato", "Bitrate", "Duración", "Tamaño bytes", "Puntaje Calidad", "Razón"])
+            for group in groups:
+                for track in group.tracks:
+                    is_best = (track.filepath == group.best_track_path)
+                    action = "CONSERVAR" if is_best else "ELIMINAR"
+                    writer.writerow([
+                        group.group_id, group.primary_type.value, action, track.filepath,
+                        track.format, track.bitrate, track.duration, track.filesize,
+                        track.quality_score, group.best_track_reason if is_best else ""
+                    ])
+        console.print(f"[bold green]✅ Resultados exportados a:[/] {args.export_csv}\n")
+
     if args.auto_move:
-        auto_apply_recommendations(groups)
-        console.print(f"[bold cyan]Moviendo duplicados a:[/] {args.auto_move}")
-        success, failed, logs = move_marked_duplicates(groups, args.auto_move, db=db)
-        console.print(f"[bold green]Movidos con éxito: {success} archivos. Errores: {failed}[/]")
+        if args.dry_run:
+            console.print(f"[bold yellow]DRY-RUN:[/] Se moverían los duplicados inferiores a: {args.auto_move}")
+        else:
+            auto_apply_recommendations(groups)
+            console.print(f"[bold cyan]Moviendo duplicados a:[/] {args.auto_move}")
+            success, failed, logs = move_marked_duplicates(groups, args.auto_move, db=db)
+            console.print(f"[bold green]Movidos con éxito: {success} archivos. Errores: {failed}[/]")
 
 
 if __name__ == "__main__":

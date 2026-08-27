@@ -1,5 +1,6 @@
 """
-Main Desktop Application Window using PyQt6.
+Main Desktop Application Window — Audio Cleaner (Figma Design).
+Layout: Sidebar | Multi-View Stack (Biblioteca, Escaneo, Duplicados, Calidad, Configuración) | Bottom Player Bar
 """
 
 import os
@@ -8,12 +9,11 @@ from typing import List, Optional
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QScrollArea, QFileDialog, QMessageBox, QApplication,
-    QFrame
+    QFrame, QSizePolicy, QDialog, QStackedWidget
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-import qtawesome as qta
 
-from core.models import DuplicateGroup, DuplicateType, ScanStats
+from core.models import DuplicateGroup, DuplicateType, ScanStats, FileAction
 from core.scanner import AudioScanner
 from core.database import Database
 from core.file_manager import (
@@ -25,19 +25,29 @@ from gui.components.scan_progress import ScanProgressWidget
 from gui.components.filter_bar import FilterBar
 from gui.components.duplicate_card import DuplicateGroupCard
 from gui.components.audio_player import AudioPlayer
+from gui.components.sidebar import Sidebar
+from gui.components.stats_bar import StatsBar
+from gui.components.bottom_player import BottomPlayerBar
+from gui.components.delete_modal import DeleteModal
+from gui.components.library_view import LibraryView
+from gui.components.quality_view import QualityView
+from gui.components.settings_view import SettingsView
+from gui.components.scanner_view import ScannerView
 from gui.styles import COLORS, GLOBAL_QSS
+
+import qtawesome as qta
 
 
 class ScannerWorker(QThread):
     """Background thread for running the scan without blocking the GUI."""
     progress_updated = pyqtSignal(ScanStats)
     scan_finished = pyqtSignal(list)
-    
+
     def __init__(self, scanner: AudioScanner, folder: str):
         super().__init__()
         self.scanner = scanner
         self.folder = folder
-        
+
     def run(self):
         groups = self.scanner.scan_directory(
             self.folder,
@@ -50,9 +60,9 @@ class AudioDuplicateDetectorApp(QMainWindow):
     def __init__(self, initial_folder: Optional[str] = None):
         super().__init__()
 
-        self.setWindowTitle("🎵 Analizador de Duplicados de Música Acústico")
-        self.resize(1100, 820)
-        self.setMinimumSize(950, 650)
+        self.setWindowTitle("Audio Cleaner — Detector de Duplicados")
+        self.resize(1280, 860)
+        self.setMinimumSize(1024, 680)
 
         self.db = Database()
         self.scanner = AudioScanner(db=self.db)
@@ -62,7 +72,7 @@ class AudioDuplicateDetectorApp(QMainWindow):
         self.current_folder: str = initial_folder or ""
         self.all_groups: List[DuplicateGroup] = []
         self.filtered_groups: List[DuplicateGroup] = []
-        
+
         self.current_filter_type: str = "all"
         self.current_search_query: str = ""
         self.current_sort_mode: str = "Mayor Ahorro de Espacio"
@@ -72,109 +82,303 @@ class AudioDuplicateDetectorApp(QMainWindow):
         self._render_job_id: int = 0
 
         self._build_layout()
+        self._load_saved_session(initial_folder)
+
+    def _get_session_path(self) -> str:
+        app_data = os.environ.get("APPDATA", os.path.expanduser("~"))
+        folder = os.path.join(app_data, "AudioDuplicateDetector")
+        os.makedirs(folder, exist_ok=True)
+        return os.path.join(folder, "last_session.json")
+
+    def _save_current_session(self):
+        try:
+            import json
+            path = self._get_session_path()
+            data = {
+                "folder": self.current_folder,
+                "groups": [g.to_dict() for g in self.all_groups]
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except Exception:
+            pass
+
+    def _load_saved_session(self, initial_folder: Optional[str] = None):
+        import json
+        saved_folder = ""
+        saved_groups = []
+        try:
+            path = self._get_session_path()
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    saved_folder = data.get("folder", "")
+                    raw_groups = data.get("groups", [])
+                    saved_groups = [DuplicateGroup.from_dict(g) for g in raw_groups]
+        except Exception:
+            pass
+
+        target_folder = initial_folder or saved_folder
+        if target_folder and os.path.exists(target_folder):
+            self.set_active_folder(target_folder)
+
+        if saved_groups:
+            self.all_groups = saved_groups
+            self._refresh_view()
+        elif not self.all_groups:
+            self._show_empty_state()
+
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Layout construction
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _build_layout(self):
-        central_widget = QWidget()
-        central_widget.setObjectName("main_window")
-        self.setCentralWidget(central_widget)
-        
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
+        central = QWidget()
+        central.setObjectName("main_window")
+        self.setCentralWidget(central)
 
-        # 1. Top Navigation & Folder Selection Bar
-        top_bar = QFrame()
-        top_bar.setStyleSheet(f"background-color: {COLORS['bg_card']};")
-        top_bar.setFixedHeight(70)
-        top_layout = QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(20, 0, 20, 0)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        title_lbl = QLabel("Audio Fingerprint Duplicate Detector")
-        title_lbl.setObjectName("title")
-        top_layout.addWidget(title_lbl)
-        
-        top_layout.addStretch()
+        # ── Content row: sidebar + main panel ─────────────────────
+        content_row = QHBoxLayout()
+        content_row.setContentsMargins(0, 0, 0, 0)
+        content_row.setSpacing(0)
 
-        self.lbl_selected_folder = QLabel(self.current_folder or "Ninguna carpeta seleccionada")
-        self.lbl_selected_folder.setObjectName("small")
-        self.lbl_selected_folder.setStyleSheet(f"color: {COLORS['text_muted']};")
-        top_layout.addWidget(self.lbl_selected_folder)
+        # Left sidebar
+        self.sidebar = Sidebar()
+        self.sidebar.nav_changed.connect(self._on_nav_changed)
+        self.sidebar.folder_requested.connect(self._choose_folder)
+        content_row.addWidget(self.sidebar)
 
-        self.btn_select = QPushButton(" Seleccionar Carpeta")
-        self.btn_select.setIcon(qta.icon("fa5s.folder-open", color=COLORS["text_main"]))
-        self.btn_select.clicked.connect(self._choose_folder)
-        top_layout.addWidget(self.btn_select)
+        # Main Stacked Panel
+        self.stack = QStackedWidget()
+        self.stack.setObjectName("main_panel")
 
-        self.btn_scan = QPushButton(" Iniciar Escaneo")
-        self.btn_scan.setIcon(qta.icon("fa5s.rocket", color="white"))
-        self.btn_scan.setObjectName("primary")
-        self.btn_scan.clicked.connect(self._start_scan)
-        top_layout.addWidget(self.btn_scan)
+        # ── Page 0: Library View ───────────────────────────────────
+        self.library_view = LibraryView(db=self.db)
+        self.library_view.scan_requested.connect(self._start_scan)
+        self.library_view.folder_requested.connect(self._choose_folder)
+        self.stack.addWidget(self.library_view)
 
-        main_layout.addWidget(top_bar)
+        # ── Page 1: Scanner View ───────────────────────────────────
+        self.scanner_view = ScannerView()
+        self.scanner_view.start_scan_requested.connect(self._start_scan)
+        self.scanner_view.pause_scan_requested.connect(self.scanner.pause)
+        self.scanner_view.resume_scan_requested.connect(self.scanner.resume)
+        self.scanner_view.cancel_scan_requested.connect(self.scanner.stop)
+        self.scanner_view.folder_requested.connect(self._choose_folder)
+        self.scanner_view.view_duplicates_requested.connect(
+            lambda: self.sidebar.set_active_section("Duplicados")
+        )
+        self.stack.addWidget(self.scanner_view)
 
-        # 2. Main Content Container
-        content_container = QWidget()
-        content_layout = QVBoxLayout(content_container)
-        content_layout.setContentsMargins(20, 16, 20, 16)
-        content_layout.setSpacing(12)
+        # ── Page 2: Duplicates View (Main Analysis) ────────────────
+        self.duplicates_view = QWidget()
+        self.duplicates_view.setObjectName("main_panel")
+        dup_layout = QVBoxLayout(self.duplicates_view)
+        dup_layout.setContentsMargins(24, 20, 24, 20)
+        dup_layout.setSpacing(14)
 
-        # 3. Progress Widget
-        self.progress_widget = ScanProgressWidget()
-        self.progress_widget.pause_requested.connect(self.scanner.pause)
-        self.progress_widget.resume_requested.connect(self.scanner.resume)
-        self.progress_widget.cancel_requested.connect(self.scanner.stop)
-        self.progress_widget.hide()
-        content_layout.addWidget(self.progress_widget)
+        # Stats Bar
+        self.stats_bar = StatsBar()
+        self.stats_bar.auto_recommend_requested.connect(self._handle_auto_recommend)
+        self.stats_bar.move_duplicates_requested.connect(self._handle_move_duplicates)
+        self.stats_bar.delete_duplicates_requested.connect(self._handle_delete_duplicates)
+        dup_layout.addWidget(self.stats_bar)
 
-        # 4. Filter & Batch Action Bar
+        # Filter bar
         self.filter_bar = FilterBar(
             on_search_changed=self._apply_search,
             on_filter_changed=self._apply_filter,
             on_sort_changed=self._apply_sort,
             on_auto_recommend=self._handle_auto_recommend,
             on_move_duplicates=self._handle_move_duplicates,
-            on_delete_duplicates=self._handle_delete_duplicates
+            on_delete_duplicates=self._handle_delete_duplicates,
         )
-        content_layout.addWidget(self.filter_bar)
+        dup_layout.addWidget(self.filter_bar)
 
-        # 5. Scrollable Results Area
+        # Scrollable results area
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        
+
         self.scroll_content = QWidget()
+        self.scroll_content.setStyleSheet(f"background-color: {COLORS['bg_main']};")
         self.scroll_layout = QVBoxLayout(self.scroll_content)
         self.scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.scroll_layout.setContentsMargins(0, 0, 10, 0)
-        self.scroll_layout.setSpacing(10)
-        
+        self.scroll_layout.setContentsMargins(0, 0, 8, 0)
+        self.scroll_layout.setSpacing(8)
+
         self.scroll_area.setWidget(self.scroll_content)
-        content_layout.addWidget(self.scroll_area, stretch=1)
-        
-        main_layout.addWidget(content_container, stretch=1)
+        dup_layout.addWidget(self.scroll_area, stretch=1)
+        self.stack.addWidget(self.duplicates_view)
 
-        self._show_empty_state("Selecciona una carpeta y pulsa 'Iniciar Escaneo' para comenzar.")
+        # ── Page 3: Quality View ───────────────────────────────────
+        self.quality_view = QualityView(db=self.db)
+        self.quality_view.scan_requested.connect(self._start_scan)
+        self.stack.addWidget(self.quality_view)
 
-    def _show_empty_state(self, message: str):
+        # ── Page 4: Settings View ──────────────────────────────────
+        self.settings_view = SettingsView(db=self.db)
+        self.settings_view.settings_saved.connect(self._on_settings_saved)
+        self.stack.addWidget(self.settings_view)
+
+        content_row.addWidget(self.stack, stretch=1)
+
+        row_container = QWidget()
+        row_container.setLayout(content_row)
+        root.addWidget(row_container, stretch=1)
+
+        # ── Bottom Player Bar (fixed height at bottom) ─────────────
+        self.bottom_player = BottomPlayerBar()
+        root.addWidget(self.bottom_player)
+
+        # Set default view to Duplicados
+        self.stack.setCurrentIndex(2)
+        self._show_empty_state()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Navigation & folder
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _on_nav_changed(self, section: str):
+        if section == "Biblioteca":
+            self.stack.setCurrentIndex(0)
+            self.library_view.set_folder(self.current_folder)
+        elif section == "Escaneo":
+            self.stack.setCurrentIndex(1)
+            self.scanner_view.set_folder(self.current_folder)
+        elif section == "Duplicados":
+            self.stack.setCurrentIndex(2)
+            self._refresh_view()
+        elif section == "Calidad":
+            self.stack.setCurrentIndex(3)
+            self.quality_view.set_folder(self.current_folder)
+        elif section == "Configuración":
+            self.stack.setCurrentIndex(4)
+            self.settings_view.refresh_db_stats()
+
+    def set_active_folder(self, folder: str):
+        self.current_folder = folder
+        self.sidebar.set_folder(folder)
+        self.sidebar.storage_bar.update_from_folder(folder)
+        self.scanner_view.set_folder(folder)
+        self.library_view.set_folder(folder)
+        self.quality_view.set_folder(folder)
+        self._save_current_session()
+
+    def _choose_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Seleccionar Carpeta de Música", self.current_folder
+        )
+        if folder:
+            self.set_active_folder(folder)
+
+    def _on_settings_saved(self, config: dict):
+        if "similarity_threshold" in config:
+            self.scanner.similarity_threshold = config["similarity_threshold"]
+        if "threads" in config:
+            self.scanner.max_workers = config["threads"]
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Scanning
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _start_scan(self):
+        if not self.current_folder or not os.path.isdir(self.current_folder):
+            reply = QMessageBox.question(
+                self, "Carpeta requerida",
+                "No hay una carpeta de música seleccionada. ¿Deseas seleccionar una carpeta ahora?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._choose_folder()
+                if not self.current_folder or not os.path.isdir(self.current_folder):
+                    return
+            else:
+                return
+
+        self.stats_bar.reset()
+        self.sidebar.set_active_section("Escaneo")
+        self.stack.setCurrentIndex(1)
+        self.scanner_view.start_scanning_ui()
+
+        self.worker = ScannerWorker(self.scanner, self.current_folder)
+        self.worker.progress_updated.connect(self.scanner_view.update_stats)
+        self.worker.scan_finished.connect(self._on_scan_finished)
+        self.worker.start()
+
+    def _on_scan_finished(self, groups: List[DuplicateGroup]):
+        self.all_groups = groups
+        self.scanner_view.finish_scanning_ui(len(groups))
+        self._save_current_session()
+
+        # Update all views data
+        self.library_view.reload_tracks()
+        self.quality_view.reload_tracks()
+        self.sidebar.storage_bar.update_from_folder(self.current_folder)
+        self.settings_view.refresh_db_stats()
+
+        # Switch to Duplicados if duplicate groups were found
+        if groups:
+            self.sidebar.set_active_section("Duplicados")
+            self.stack.setCurrentIndex(2)
+            self._refresh_view()
+        else:
+            self._refresh_view()
+
+    def closeEvent(self, event):
+        self._save_current_session()
+        super().closeEvent(event)
+
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Empty & results states
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _show_empty_state(self, message: str = ""):
         self._clear_results_area()
 
         empty_frame = QFrame()
         empty_frame.setObjectName("transparent")
         layout = QVBoxLayout(empty_frame)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.setContentsMargins(0, 80, 0, 0)
+        layout.setContentsMargins(0, 60, 0, 0)
+        layout.setSpacing(20)
 
         icon_lbl = QLabel()
-        icon_lbl.setPixmap(qta.icon("fa5s.search", color=COLORS["text_dim"]).pixmap(64, 64))
+        icon_lbl.setPixmap(
+            qta.icon("fa5s.wave-square", color=COLORS["text_dim"]).pixmap(72, 72)
+        )
         icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(icon_lbl)
 
-        text_lbl = QLabel(message)
-        text_lbl.setObjectName("subtitle")
-        text_lbl.setStyleSheet(f"color: {COLORS['text_dim']}; background: transparent;")
-        text_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(text_lbl)
+        if not message:
+            message = "No se han encontrado duplicados"
+        msg_lbl = QLabel(message)
+        msg_lbl.setStyleSheet(f"font-size: 14pt; font-weight: bold; color: {COLORS['text_dim']};")
+        msg_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(msg_lbl)
+
+        sub_lbl = QLabel(
+            "Selecciona una carpeta en la barra lateral o pulsa 'Iniciar escaneo'\n"
+            "para detectar archivos duplicados y evaluar calidad."
+        )
+        sub_lbl.setStyleSheet(f"color: {COLORS['text_dim']}; font-size: 10pt;")
+        sub_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(sub_lbl)
+
+        btn_scan = QPushButton("  Iniciar escaneo de biblioteca")
+        btn_scan.setObjectName("primary")
+        btn_scan.setIcon(qta.icon("fa5s.search", color="#000000"))
+        btn_scan.setFixedSize(260, 40)
+        btn_scan.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_scan.clicked.connect(self._start_scan)
+        layout.addWidget(btn_scan, alignment=Qt.AlignmentFlag.AlignCenter)
 
         self.scroll_layout.addWidget(empty_frame)
 
@@ -186,35 +390,9 @@ class AudioDuplicateDetectorApp(QMainWindow):
             if widget:
                 widget.deleteLater()
 
-    def _choose_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Seleccionar Carpeta de Música", self.current_folder)
-        if folder:
-            self.current_folder = folder
-            disp = folder if len(folder) < 35 else "..." + folder[-32:]
-            self.lbl_selected_folder.setText(disp)
-
-    def _start_scan(self):
-        if not self.current_folder or not os.path.isdir(self.current_folder):
-            QMessageBox.warning(self, "Carpeta requerida", "Por favor selecciona una carpeta válida con archivos de música.")
-            return
-
-        self.btn_scan.setEnabled(False)
-        self.btn_select.setEnabled(False)
-        
-        self.progress_widget.show()
-        self._show_empty_state("Analizando biblioteca de música... Por favor espera.")
-
-        self.worker = ScannerWorker(self.scanner, self.current_folder)
-        self.worker.progress_updated.connect(self.progress_widget.update_stats)
-        self.worker.scan_finished.connect(self._on_scan_finished)
-        self.worker.start()
-
-    def _on_scan_finished(self, groups: List[DuplicateGroup]):
-        self.progress_widget.hide()
-        self.btn_scan.setEnabled(True)
-        self.btn_select.setEnabled(True)
-        self.all_groups = groups
-        self._refresh_view()
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Filter / sort / search
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _apply_filter(self, filter_type: str):
         self.current_filter_type = filter_type
@@ -229,7 +407,7 @@ class AudioDuplicateDetectorApp(QMainWindow):
         self._refresh_view()
 
     def _refresh_view(self):
-        """Filters, sorts, and renders the cards using PyQt's highly optimized scroll area."""
+        """Filters, sorts, and renders the cards."""
         filtered = []
         for g in self.all_groups:
             if self.current_filter_type == "exact":
@@ -243,7 +421,7 @@ class AudioDuplicateDetectorApp(QMainWindow):
                     continue
 
             if self.current_search_query:
-                q = self.current_search_query
+                q = self.current_search_query.lower()
                 match = any(
                     q in t.filename.lower() or
                     q in t.title.lower() or
@@ -257,7 +435,6 @@ class AudioDuplicateDetectorApp(QMainWindow):
 
             filtered.append(g)
 
-        # Sort
         if self.current_sort_mode == "Mayor Ahorro de Espacio":
             filtered.sort(key=lambda g: g.space_saving_bytes, reverse=True)
         elif self.current_sort_mode == "Mayor Similitud":
@@ -268,6 +445,12 @@ class AudioDuplicateDetectorApp(QMainWindow):
             filtered.sort(key=lambda g: len(g.tracks), reverse=True)
 
         self.filtered_groups = filtered
+
+        # Update global stats
+        total_files = sum(len(g.tracks) for g in self.all_groups)
+        total_space = sum(g.space_saving_bytes for g in self.all_groups)
+        self.stats_bar.update_stats(len(self.all_groups), total_files, total_space)
+
         self._current_page = 0
         self._render_job_id += 1
         self._render_cards(job_id=self._render_job_id)
@@ -275,11 +458,10 @@ class AudioDuplicateDetectorApp(QMainWindow):
     def _render_cards(self, job_id: int):
         if job_id != self._render_job_id:
             return
-            
+
         if self._current_page == 0:
             self._clear_results_area()
-            
-            # Calculate stats for the FilterBar (only on first page)
+
             counts = {"all": 0, "exact": 0, "acoustic": 0, "possible": 0}
             for g in self.all_groups:
                 counts["all"] += 1
@@ -289,7 +471,7 @@ class AudioDuplicateDetectorApp(QMainWindow):
                     counts["acoustic"] += 1
                 elif g.primary_type == DuplicateType.POSSIBLE_DUPLICATE:
                     counts["possible"] += 1
-            
+
             self.filter_bar.update_counts(counts, len(self.filtered_groups))
 
             if not self.filtered_groups:
@@ -302,84 +484,112 @@ class AudioDuplicateDetectorApp(QMainWindow):
 
         for group in chunk:
             card = DuplicateGroupCard(
-                group, 
+                group,
                 on_action_changed=self._on_group_action_changed
             )
             self.scroll_layout.addWidget(card)
-            
-        # Add "Load More" button if there are more results
+
         if end_idx < len(self.filtered_groups):
             self.btn_load_more = QPushButton("Cargar más resultados...")
-            self.btn_load_more.setObjectName("primary")
+            self.btn_load_more.setObjectName("ghost")
             self.btn_load_more.setFixedHeight(40)
             self.btn_load_more.clicked.connect(lambda: self._load_next_page(job_id))
             self.scroll_layout.addWidget(self.btn_load_more)
 
     def _load_next_page(self, job_id: int):
-        if hasattr(self, 'btn_load_more') and self.btn_load_more:
+        if hasattr(self, "btn_load_more") and self.btn_load_more:
             self.btn_load_more.deleteLater()
             self.btn_load_more = None
-            
+
         self._current_page += 1
         self._render_cards(job_id)
 
     def _on_group_action_changed(self, group: DuplicateGroup):
-        # Optional hook to update global stats if needed
         pass
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  Actions
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _handle_auto_recommend(self):
         if not self.filtered_groups:
             return
         mod = auto_apply_recommendations(self.filtered_groups)
         self._refresh_view()
-        QMessageBox.information(self, "Auto-Selección", f"Se han auto-seleccionado las recomendaciones de calidad en {mod} grupos.")
+        QMessageBox.information(
+            self, "Auto-Selección",
+            f"Se han auto-seleccionado las recomendaciones de calidad en {mod} grupos."
+        )
 
     def _handle_move_duplicates(self):
-        target_dir = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta destino para duplicados")
+        target_dir = QFileDialog.getExistingDirectory(
+            self, "Seleccionar carpeta destino para duplicados"
+        )
         if not target_dir:
             return
-            
         success, failed, logs = move_marked_duplicates(self.filtered_groups, target_dir)
         msg = f"Archivos movidos: {success}"
         if failed:
             msg += f"\nErrores al mover: {failed}"
-            
         QMessageBox.information(self, "Mover Completado", msg)
         self._refresh_view()
 
     def _handle_delete_duplicates(self):
-        reply = QMessageBox.question(
-            self,
-            "Confirmar Eliminación",
-            "¿Estás seguro de que deseas ELIMINAR PERMANENTEMENTE los archivos marcados? Esta acción no se puede deshacer.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
-        )
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            success, failed, logs = delete_marked_duplicates_permanently(self.filtered_groups)
-            msg = f"Archivos eliminados: {success}"
+        marked = [
+            t for g in self.filtered_groups for t in g.tracks
+            if t.action == FileAction.DELETE
+        ]
+        if not marked:
+            QMessageBox.information(
+                self, "Sin archivos seleccionados",
+                "Marca al menos un archivo como ELIMINAR antes de continuar."
+            )
+            return
+
+        modal = DeleteModal(self.filtered_groups, parent=self)
+        if modal.exec() == QDialog.DialogCode.Accepted:
+            success, failed, logs = modal.execute_action()
+            msg = f"Archivos procesados: {success}"
             if failed:
-                msg += f"\nErrores al eliminar: {failed}"
-                
-            QMessageBox.information(self, "Eliminación Completada", msg)
+                msg += f"\nErrores: {failed}"
+            QMessageBox.information(self, "Acción completada", msg)
             self._refresh_view()
 
+    def closeEvent(self, event):
+        """Properly clean up resources on window close."""
+        self._save_current_session()
+        # Stop any running scan
+        if self.worker and self.worker.isRunning():
+            self.scanner.stop()
+            self.worker.wait(2000)
+        # Close the persistent SQLite connection gracefully
+        try:
+            self.db.close()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Entry point
+# ─────────────────────────────────────────────────────────────────────────────
 
 def run_gui(initial_folder=None):
-    # Set Windows App User Model ID so the taskbar displays the custom icon properly
     if sys.platform == "win32":
         try:
             import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("mycompany.audioduplicatedetector.v1")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "mycompany.audiocleaner.v1"
+            )
         except Exception:
             pass
 
     app = QApplication(sys.argv)
     app.setStyleSheet(GLOBAL_QSS)
 
-    # Set Application Icon
-    icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app_icon.png")
+    icon_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app_icon.png"
+    )
     if hasattr(sys, "_MEIPASS"):
         meipass_icon = os.path.join(sys._MEIPASS, "app_icon.png")
         if os.path.exists(meipass_icon):
@@ -387,8 +597,7 @@ def run_gui(initial_folder=None):
 
     if os.path.exists(icon_path):
         from PyQt6.QtGui import QIcon
-        app_icon = QIcon(icon_path)
-        app.setWindowIcon(app_icon)
+        app.setWindowIcon(QIcon(icon_path))
 
     window = AudioDuplicateDetectorApp(initial_folder)
     if os.path.exists(icon_path):

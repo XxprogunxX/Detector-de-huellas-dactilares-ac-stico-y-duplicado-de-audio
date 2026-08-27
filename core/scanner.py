@@ -20,15 +20,45 @@ from core.database import Database
 from core.clustering import cluster_duplicates
 
 
+# CPU usage ceiling: if system CPU exceeds this, the scanner throttles
+_CPU_THROTTLE_THRESHOLD = 85.0   # percent
+_CPU_THROTTLE_SLEEP     = 0.35   # seconds to sleep when throttling
+_CPU_THROTTLE_INTERVAL  = 8      # check CPU every N completed files
+
+
+
 SUPPORTED_EXTENSIONS = {
     ".mp3", ".flac", ".wav", ".m4a", ".aac", ".ogg",
     ".opus", ".wma", ".alac", ".aiff", ".ape", ".wv"
 }
 
 
+def _worker_process_init():
+    """
+    Runs once in each spawned worker process (ProcessPoolExecutor initializer).
+    Drops the worker process to BELOW_NORMAL CPU priority so audio scanning
+    never starves the GUI or the OS on any computer.
+    """
+    try:
+        import psutil
+        p = psutil.Process()
+        if hasattr(psutil, "BELOW_NORMAL_PRIORITY_CLASS"):
+            # Windows
+            p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+        else:
+            # Linux / macOS: nice value 10 = noticeably lower priority
+            p.nice(10)
+    except Exception:
+        pass  # Non-fatal: runs at normal priority if psutil unavailable
+
+
 def _process_audio_worker(filepath: str) -> Optional[Dict[str, Any]]:
     """
     Worker function executed in parallel processes to analyze a single audio file.
+    Order of operations is optimized for early-exit:
+      1. Fingerprint first (fpcalc, 60s window) — fastest way to detect corrupt/unsupported files
+      2. SHA256 + PCM hash only if fingerprint succeeded
+      3. Metadata and spectral cutoff last
     """
     try:
         if not os.path.isfile(filepath):
@@ -38,18 +68,25 @@ def _process_audio_worker(filepath: str) -> Optional[Dict[str, Any]]:
         filesize = stat.st_size
         mtime = stat.st_mtime
 
-        # 1. Binary SHA-256 Hash
-        sha256 = compute_file_sha256(filepath)
+        # 1. Acoustic Fingerprint first — if fpcalc fails, the file is unusable
+        #    60s is sufficient for Chromaprint (was 120s, halving CPU time for this step).
+        try:
+            duration, raw_fp = extract_fingerprint(filepath, max_length_seconds=60)
+        except Exception:
+            return None  # Can't fingerprint → skip everything else
 
         # 2. Metadata (bitrate, sample rate, channels, tags)
         meta = extract_metadata(filepath)
-
-        # 3. Acoustic Fingerprint (Chromaprint / fpcalc with 120s window)
-        duration, raw_fp = extract_fingerprint(filepath, max_length_seconds=120)
         if duration <= 0.0:
             duration = meta.get("duration", 0.0)
 
-        # 4. Selective Spectral Cutoff (Only run FFT on Lossless to catch fake upscales)
+        # 3. Binary SHA-256 Hash
+        sha256 = compute_file_sha256(filepath)
+
+        # 4. PCM Audio Hash (first 30s only — see fingerprint.py)
+        audio_hash = compute_audio_pcm_hash(filepath)
+
+        # 5. Selective Spectral Cutoff (Only run FFT on Lossless to catch fake upscales)
         is_lossless = meta.get("is_lossless", False)
         if is_lossless:
             spectral_cutoff, fake_lossless_confidence = estimate_spectral_cutoff(filepath)
@@ -64,7 +101,7 @@ def _process_audio_worker(filepath: str) -> Optional[Dict[str, Any]]:
             "filesize": filesize,
             "mtime": mtime,
             "sha256": sha256,
-            "audio_hash": "",
+            "audio_hash": audio_hash,
             "duration": duration,
             "format": meta.get("format", ""),
             "bitrate": meta.get("bitrate", 0),
@@ -80,18 +117,53 @@ def _process_audio_worker(filepath: str) -> Optional[Dict[str, Any]]:
             "album": meta.get("album", ""),
         }
         return track_data
-    except Exception as e:
+    except Exception:
         return None
 
 
 class AudioScanner:
     def __init__(self, db: Optional[Database] = None, max_workers: Optional[int] = None):
         self.db = db or Database()
-        self.max_workers = max_workers or max(1, min(8, os.cpu_count() or 4))
+        cpu_cores = os.cpu_count() or 4
+
+        if max_workers is not None:
+            self.max_workers = max_workers
+        else:
+            # Adaptive worker count: leave cores free for OS/GUI AND respect available RAM.
+            # Each worker peak RAM: ~300-400 MB (ffmpeg decode + numpy FFT buffers).
+            # This prevents memory thrashing on PCs with 4-8 GB RAM.
+            try:
+                import psutil
+                available_ram_gb = psutil.virtual_memory().available / (1024 ** 3)
+                # Allow 1 worker per 0.5 GB of available RAM, capped at cpu_cores-1
+                ram_based_limit = max(1, int(available_ram_gb / 0.5))
+                cpu_based_limit = max(1, cpu_cores - 1 if cpu_cores > 2 else cpu_cores)
+                self.max_workers = min(ram_based_limit, cpu_based_limit, 6)
+            except ImportError:
+                # psutil not installed: fall back to conservative CPU-only heuristic
+                self.max_workers = max(1, min(4, cpu_cores - 1 if cpu_cores > 2 else cpu_cores))
+
         self.stats = ScanStats()
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._pause_event.set()  # Unpaused initially
+        self._cpu_throttle_enabled = True  # Can be disabled via settings
+
+    def _maybe_throttle_cpu(self):
+        """
+        If system CPU usage is above the threshold, sleep briefly to give
+        the OS and GUI a chance to breathe. Uses psutil; no-op if not installed.
+        """
+        if not self._cpu_throttle_enabled:
+            return
+        try:
+            import psutil
+            cpu_pct = psutil.cpu_percent(interval=None)
+            if cpu_pct >= _CPU_THROTTLE_THRESHOLD:
+                time.sleep(_CPU_THROTTLE_SLEEP)
+        except ImportError:
+            pass
+
 
     def pause(self):
         """Pauses the ongoing scan."""
@@ -131,6 +203,7 @@ class AudioScanner:
 
         # 1. Discover all audio files
         discovered_files: List[str] = []
+        last_walk_update = time.time()
         for root, _, files in os.walk(folder_path):
             if self._stop_event.is_set():
                 break
@@ -139,7 +212,17 @@ class AudioScanner:
                 if ext in SUPPORTED_EXTENSIONS:
                     discovered_files.append(os.path.join(root, f))
 
+            now = time.time()
+            if progress_callback and (now - last_walk_update > 0.15 or len(discovered_files) % 500 == 0):
+                self.stats.total_files_found = len(discovered_files)
+                self.stats.current_file = root
+                self.stats.elapsed_seconds = now - start_time
+                self.stats.phase = f"Descubriendo archivos ({len(discovered_files):,} encontrados)..."
+                progress_callback(self.stats)
+                last_walk_update = now
+
         self.stats.total_files_found = len(discovered_files)
+        self.stats.phase = f"Descubrimiento completado: {len(discovered_files):,} archivos encontrados"
         if progress_callback:
             progress_callback(self.stats)
 
@@ -147,13 +230,16 @@ class AudioScanner:
             self.stats.is_running = False
             return []
 
+
         # 2. Check Database Cache (Bulk in-memory check for instant speed on 40k+ files)
         self.stats.phase = "Verificando caché..."
         tracks_to_process: List[str] = []
         all_tracks: List[AudioTrack] = []
         
-        cached_map = self.db.get_all_cached_lookup()
+        cached_map = self.db.get_lightweight_cache_lookup()
         total_discovered = len(discovered_files)
+
+        cached_paths_to_load: List[str] = []
 
         for idx, fpath in enumerate(discovered_files, start=1):
             if self._stop_event.is_set():
@@ -161,8 +247,8 @@ class AudioScanner:
             try:
                 stat = os.stat(fpath)
                 cached = cached_map.get(fpath)
-                if cached and cached.filesize == stat.st_size and abs(cached.mtime - stat.st_mtime) < 0.001:
-                    all_tracks.append(cached)
+                if cached and cached[0] == stat.st_size and abs(cached[1] - stat.st_mtime) < 0.001:
+                    cached_paths_to_load.append(fpath)
                     self.stats.files_from_cache += 1
                     self.stats.files_scanned += 1
                 else:
@@ -183,7 +269,9 @@ class AudioScanner:
             batch_save: List[AudioTrack] = []
             
             # Stream tasks to avoid holding 40k futures in memory simultaneously
-            with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+            # initializer: each worker process lowers its own CPU priority to
+            # BELOW_NORMAL so the GUI and OS always stay responsive.
+            with ProcessPoolExecutor(max_workers=self.max_workers, initializer=_worker_process_init) as executor:
                 max_in_flight = self.max_workers * 4
                 file_iter = iter(tracks_to_process)
                 futures = {}
@@ -250,9 +338,14 @@ class AudioScanner:
                             pass
 
                         # Periodic batch save to database
-                        if len(batch_save) >= 30:
+                        if len(batch_save) >= 200:
                             self.db.upsert_tracks_batch(batch_save)
                             batch_save.clear()
+
+                        # Adaptive CPU throttle: every N files, check if the system
+                        # is overloaded and sleep briefly to keep GUI responsive.
+                        if self.stats.files_scanned % _CPU_THROTTLE_INTERVAL == 0:
+                            self._maybe_throttle_cpu()
 
                         if progress_callback and (self.stats.files_scanned % 5 == 0 or self.stats.files_scanned == self.stats.total_files_found):
                             progress_callback(self.stats)
@@ -267,12 +360,23 @@ class AudioScanner:
             self.stats.is_running = False
             return []
 
+        self.stats.phase = "Cargando caché para agrupar..."
+        if progress_callback:
+            progress_callback(self.stats)
+            
+        # Lazy load all valid cached tracks
+        all_tracks.extend(self.db.get_tracks_for_files(cached_paths_to_load))
+
         self.stats.phase = "Agrupando duplicados..."
         if progress_callback:
             progress_callback(self.stats)
 
-        def clustering_progress(pct, msg):
+        def clustering_progress(pct, curr_comp, tot_comp, msg):
             self.stats.phase = msg
+            self.stats.progress_ratio = pct
+            self.stats.comparison_current = curr_comp
+            self.stats.comparison_total = tot_comp
+            self.stats.elapsed_seconds = time.time() - start_time
             if progress_callback:
                 progress_callback(self.stats)
 
@@ -283,6 +387,7 @@ class AudioScanner:
         )
 
         # 5. Summarize Statistics
+        self.stats.progress_ratio = 1.0
         self.stats.total_groups_count = len(groups)
         self.stats.exact_duplicates_count = sum(1 for g in groups if g.primary_type in (DuplicateType.EXACT_HASH, DuplicateType.EXACT_AUDIO))
         self.stats.acoustic_duplicates_count = sum(1 for g in groups if g.primary_type == DuplicateType.ACOUSTIC_DUPLICATE)

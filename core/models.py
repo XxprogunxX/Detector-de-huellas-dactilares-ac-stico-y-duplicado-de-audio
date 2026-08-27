@@ -99,6 +99,40 @@ class AudioTrack:
         }
 
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'AudioTrack':
+        action_val = data.get("action", "UNSET")
+        try:
+            action = FileAction(action_val)
+        except Exception:
+            action = FileAction.UNSET
+
+        return cls(
+            id=data.get("id"),
+            filepath=data.get("filepath", ""),
+            filesize=data.get("filesize", 0),
+            mtime=data.get("mtime", 0.0),
+            sha256=data.get("sha256", ""),
+            audio_hash=data.get("audio_hash", ""),
+            duration=data.get("duration", 0.0),
+            format=data.get("format", ""),
+            bitrate=data.get("bitrate", 0),
+            samplerate=data.get("samplerate", 44100),
+            channels=data.get("channels", 2),
+            bit_depth=data.get("bit_depth", 16),
+            is_lossless=bool(data.get("is_lossless", False)),
+            spectral_cutoff=data.get("spectral_cutoff", 0.0),
+            fake_lossless_confidence=float(data.get("fake_lossless_confidence", 0.0)),
+            quality_score=data.get("quality_score", 0.0),
+            quality_details=data.get("quality_details", ""),
+            fingerprint_raw=[],
+            title=data.get("title", ""),
+            artist=data.get("artist", ""),
+            album=data.get("album", ""),
+            action=action
+        )
+
+
 @dataclass
 class ComparisonResult:
     track_a_path: str
@@ -134,6 +168,36 @@ class DuplicateGroup:
         self.space_saving_bytes = max(0, total_bytes - kept_bytes)
         return self.space_saving_bytes
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "group_id": self.group_id,
+            "primary_type": self.primary_type.value,
+            "best_track_path": self.best_track_path,
+            "best_track_reason": self.best_track_reason,
+            "average_similarity": self.average_similarity,
+            "space_saving_bytes": self.space_saving_bytes,
+            "tracks": [t.to_dict() for t in self.tracks]
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'DuplicateGroup':
+        try:
+            ptype = DuplicateType(data.get("primary_type", "ACOUSTIC_DUPLICATE"))
+        except Exception:
+            ptype = DuplicateType.ACOUSTIC_DUPLICATE
+
+        tracks = [AudioTrack.from_dict(t) for t in data.get("tracks", [])]
+        return cls(
+            group_id=data.get("group_id", ""),
+            primary_type=ptype,
+            tracks=tracks,
+            best_track_path=data.get("best_track_path", ""),
+            best_track_reason=data.get("best_track_reason", ""),
+            average_similarity=float(data.get("average_similarity", 100.0)),
+            space_saving_bytes=int(data.get("space_saving_bytes", 0))
+        )
+
+
 
 @dataclass
 class ScanStats:
@@ -151,3 +215,43 @@ class ScanStats:
     is_paused: bool = False
     current_file: str = ""
     phase: str = "Idle"
+    progress_ratio: Optional[float] = None
+    comparison_current: int = 0
+    comparison_total: int = 0
+
+    @property
+    def files_processed(self) -> int:
+        return self.files_scanned
+
+    @property
+    def exact_hash_groups_count(self) -> int:
+        return self.exact_duplicates_count
+
+    @property
+    def acoustic_duplicate_groups_count(self) -> int:
+        return self.acoustic_duplicates_count
+
+    @property
+    def progress_percentage(self) -> float:
+        if self.progress_ratio is not None:
+            return max(0.0, min(100.0, self.progress_ratio * 100.0))
+        if self.total_files_found > 0:
+            return max(0.0, min(100.0, (self.files_scanned / self.total_files_found) * 100.0))
+        return 0.0
+
+    @property
+    def throughput_fps(self) -> float:
+        if self.elapsed_seconds > 0:
+            if self.files_scanned > 0:
+                return self.files_scanned / self.elapsed_seconds
+            elif self.total_files_found > 0:
+                return self.total_files_found / self.elapsed_seconds
+        return 0.0
+
+    @property
+    def eta_seconds(self) -> float:
+        if self.throughput_fps > 0 and self.total_files_found > self.files_scanned and self.files_scanned > 0:
+            return (self.total_files_found - self.files_scanned) / self.throughput_fps
+        return 0.0
+
+

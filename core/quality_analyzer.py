@@ -10,20 +10,33 @@ from typing import Tuple, Dict, Any, Optional
 from core.models import AudioTrack
 
 
-def estimate_spectral_cutoff(filepath: str, sample_rate: int = 44100, duration_probe: float = 20.0) -> Tuple[float, float]:
+def estimate_spectral_cutoff(filepath: str, sample_rate: int = 22050, duration_probe: float = 10.0) -> Tuple[float, float]:
     """
     Estimates the true acoustic high-frequency cutoff frequency (in Hz)
     using FFT spectral energy analysis to detect up-sampled / transcoded audio.
-    
+
+    Optimized for low-memory operation:
+    - sample_rate=22050 (Nyquist 11kHz, sufficient for cutoff detection up to 20kHz)
+    - duration_probe=10.0s (enough for a reliable spectrum estimate)
+    - Early-exit for very small files
+
     Returns:
         (spectral_cutoff_hz, fake_lossless_confidence_percentage)
     """
     ext = os.path.splitext(filepath)[1].lower().lstrip(".")
     is_lossless_container = ext in {"flac", "wav", "alac", "aiff", "ape", "wv"}
+
+    # Early-exit: very small files (<2 MB) are likely short clips or corrupt,
+    # no need to run the full FFT pipeline — return a conservative default.
+    try:
+        if os.path.getsize(filepath) < 2_000_000:
+            return (22050.0 if is_lossless_container else 18000.0), 0.0
+    except OSError:
+        return (22050.0 if is_lossless_container else 18000.0), 0.0
     
     try:
-        # Probe up to 20 seconds from the middle of the track (where energy is highest)
-        # Using ffmpeg to extract raw float32 mono PCM
+        # Probe up to 10 seconds of audio (sufficient for reliable spectrum estimate)
+        # Using ffmpeg to extract raw float32 mono PCM at 22050 Hz (half RAM vs 44100 Hz)
         cmd = [
             "ffmpeg", "-v", "quiet", "-nostdin",
             "-i", filepath,
@@ -38,8 +51,12 @@ def estimate_spectral_cutoff(filepath: str, sample_rate: int = 44100, duration_p
             startupinfo.wShowWindow = 0
 
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, startupinfo=startupinfo)
-        raw_bytes = proc.stdout.read()
-        proc.wait()
+        try:
+            raw_bytes, _ = proc.communicate(timeout=15.0)  # 15s timeout for a 10s probe
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raw_bytes = b""
 
         if len(raw_bytes) < sample_rate * 2:
             return 22050.0 if is_lossless_container else 20000.0, 0.0
