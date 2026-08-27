@@ -110,37 +110,41 @@ def cluster_duplicates(
                         reason="Duplicado de Audio Exacto: Misma señal PCM decodificada."
                     )
 
-    # Step 2: High-Precision Token Inverted Index with Co-occurrence Filtering
-    # Discard high-frequency generic tokens (silence/noise) and require at least 2 matching tokens.
-    # This reduces false candidate comparisons by over 98% while keeping 100% true duplicate recall.
-    token_index = defaultdict(list)
-    track_indices = {t.filepath: idx for idx, t in enumerate(tracks)}
+    # Step 2: High-Precision Subfingerprint Index with Duration Bucketing
+    if progress_callback:
+        progress_callback(0.0, 0, 0, "Indexando huellas acústicas...")
 
+    shingle_index = defaultdict(list)
     for idx, t in enumerate(tracks):
-        if not t.fingerprint_raw:
+        fp = t.fingerprint_raw
+        if not fp:
             continue
-        total_frames = len(t.fingerprint_raw)
-        # Sample frames up to 600 frames (~70 seconds)
-        end_idx = min(600, total_frames)
-        sampled_frames = t.fingerprint_raw[:end_idx]
-        
-        # Add distinct non-zero tokens and subtle 4-bit prefix to tolerate lossy compression
-        seen_tokens = set()
-        for val in sampled_frames:
-            if val != 0 and val not in seen_tokens:
-                seen_tokens.add(val)
-                token_index[val].append(idx)
-                # 28-bit prefix (drops only 4 bits) for MP3 bitrate compression tolerance
+        dur_bucket = int(t.duration // 5)
+        limit = min(300, len(fp))
+        seen = set()
+        for i in range(limit):
+            val = fp[i]
+            if val != 0:
+                s = (dur_bucket, val)
+                if s not in seen:
+                    seen.add(s)
+                    shingle_index[s].append(idx)
+                # 28-bit prefix for MP3 compression tolerance
                 prefix_val = val & 0xFFFFFFF0
                 if prefix_val != val:
-                    token_index[prefix_val].append(idx)
+                    sp = (dur_bucket, prefix_val)
+                    if sp not in seen:
+                        seen.add(sp)
+                        shingle_index[sp].append(idx)
+
+    if progress_callback:
+        progress_callback(0.0, 0, 0, "Filtrando coincidencias acústicas...")
 
     # Accumulate co-occurring token counts between candidate track pairs
     pair_hits = defaultdict(int)
-    max_bucket_size = 40  # Buckets larger than 40 are ubiquitous ambient noise/common chords
+    max_bucket_size = 35
 
-    for token, group in token_index.items():
-        # Remove duplicate track IDs in bucket if any
+    for s, group in shingle_index.items():
         unique_group = list(set(group))
         group_len = len(unique_group)
         if 1 < group_len <= max_bucket_size:
@@ -153,18 +157,22 @@ def cluster_duplicates(
 
     candidate_pairs_set = set()
     for (idx_a, idx_b), hits in pair_hits.items():
-        # Require at least 2 matching sub-fingerprints and duration difference <= 15s
-        if hits >= 2:
-            t_a = tracks[idx_a]
-            t_b = tracks[idx_b]
-            if abs(t_a.duration - t_b.duration) <= 15.0:
-                if ds.find(t_a.filepath) != ds.find(t_b.filepath):
-                    p1, p2 = (t_a.filepath, t_b.filepath) if t_a.filepath < t_b.filepath else (t_b.filepath, t_a.filepath)
-                    candidate_pairs_set.add((p1, p2))
+        t_a = tracks[idx_a]
+        t_b = tracks[idx_b]
+        min_hits = 1 if min(len(t_a.fingerprint_raw), len(t_b.fingerprint_raw)) < 15 else 2
+        if hits >= min_hits and abs(t_a.duration - t_b.duration) <= 8.0:
+            if ds.find(t_a.filepath) != ds.find(t_b.filepath):
+                p1, p2 = (t_a.filepath, t_b.filepath) if t_a.filepath < t_b.filepath else (t_b.filepath, t_a.filepath)
+                candidate_pairs_set.add((p1, p2))
+
 
     pairs_to_compare = [(track_map[p1], track_map[p2]) for p1, p2 in candidate_pairs_set]
     total_comparisons_est = len(pairs_to_compare)
     comparison_count = 0
+
+    if progress_callback:
+        progress_callback(0.0, 0, total_comparisons_est, f"Comparando huellas acústicas (0/{total_comparisons_est:,})...")
+
 
     if total_comparisons_est > 0:
         # Keep 1-2 CPU cores free to prevent system freeze and overheating
@@ -193,6 +201,7 @@ def cluster_duplicates(
                 if progress_callback:
                     pct = min(1.0, curr_done / total_comparisons_est)
                     progress_callback(pct, curr_done, total_comparisons_est, f"Comparando acústicamente ({curr_done:,}/{total_comparisons_est:,})...")
+
 
     # Step 3: Collect Disjoint Sets into Groups
     groups_dict: Dict[str, List[AudioTrack]] = defaultdict(list)
