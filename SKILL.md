@@ -1,385 +1,234 @@
 ---
 name: audio-duplicate-detector
-description: Guía de arquitectura, seguridad, algoritmos y desarrollo para el analizador de duplicados de audio y huellas acústicas.
+description: Guía de arquitectura, seguridad, algoritmos, desarrollo y optimización universal de rendimiento para el analizador de duplicados de audio y huellas acústicas.
 ---
 
 # Skill: Audio Duplicate & Acoustic Fingerprinting Detector
 
 ## 1. Propósito
 
-Esta skill define cómo un agente de IA debe comprender, modificar, probar y extender este repositorio. El proyecto es una aplicación de escritorio en Python para analizar bibliotecas grandes de música y detectar:
+Esta skill define cómo un agente de IA debe comprender, modificar, probar, optimizar y extender este repositorio. El proyecto es una aplicación de escritorio en Python para analizar bibliotecas grandes de música (decenas o cientos de miles de canciones) y detectar:
 
-- duplicados exactos por hash de archivo;
-- duplicados exactos del audio PCM aunque cambien etiquetas o contenedor;
-- duplicados acústicos mediante Chromaprint/fpcalc;
-- posibles versiones relacionadas mediante comparación acústica/espectral;
-- falsos lossless/transcodes mediante análisis FFT;
-- el archivo de mejor calidad dentro de un grupo de duplicados;
-- operaciones seguras para mover o eliminar archivos.
+- duplicados exactos por hash de archivo (SHA-256);
+- duplicados exactos del audio PCM aunque cambien etiquetas ID3 o contenedor;
+- duplicados acústicos mediante Chromaprint/fpcalc ($\ge 95\%$ de similitud);
+- posibles versiones relacionadas mediante comparación acústica/espectral ($80\% - 94.9\%$);
+- falsos lossless/transcodes (*Fake FLAC*) mediante análisis FFT;
+- el archivo de mejor calidad dentro de un grupo de duplicados (scoring 0–100);
+- operaciones seguras para mover o eliminar archivos (protección contra borrado accidental).
 
-La prioridad del agente es preservar la precisión de detección, la seguridad de los archivos del usuario y el rendimiento en bibliotecas grandes.
+**Prioridad rectora:** Preservar la seguridad absoluta de los archivos del usuario, la precisión de detección (cero falsos positivos) y garantizar un **rendimiento altamente optimizado y fluido en cualquier tipo de computadora** (desde equipos de gama baja / *low-end* con recursos limitados hasta estaciones de trabajo multi-núcleo).
 
-## 2. Arquitectura actual
+---
 
-La arquitectura principal está dividida en tres áreas:
+## 2. Arquitectura Actual del Proyecto
+
+El sistema está modularizado con estricta separación de responsabilidades:
 
 ```text
 main.py
 ├── core/
-│   ├── models.py
-│   ├── fingerprint.py
-│   ├── metadata_extractor.py
-│   ├── quality_analyzer.py
-│   ├── comparator.py
-│   ├── clustering.py
-│   ├── database.py
-│   ├── scanner.py
-│   └── file_manager.py
+│   ├── models.py               # Modelos de datos (AudioTrack, DuplicateGroup, ScanStats, Enums)
+│   ├── fingerprint.py          # Hashes SHA-256/PCM, huellas Chromaprint y serialización
+│   ├── metadata_extractor.py   # Extracción de metadatos con Mutagen
+│   ├── quality_analyzer.py     # Análisis espectral FFT, corte de frecuencia y scoring
+│   ├── comparator.py           # Alineamiento temporal y cálculo de distancia de Hamming
+│   ├── clustering.py           # Agrupamiento disjunto (Union-Find) y ranking
+│   ├── database.py             # Motor de persistencia SQLite WAL de alta velocidad
+│   ├── scanner.py              # Orquestador recursivo de escaneo multiproceso y por fases
+│   └── file_manager.py         # Operaciones seguras en disco (mover, marcar, eliminar)
 ├── gui/
-│   ├── app.py
-│   ├── styles.py
+│   ├── app.py                  # Ventana principal moderna en PyQt6 y orquestador GUI
+│   ├── styles.py               # Paleta de colores, estilos globales QSS y tipografía
 │   └── components/
-│       ├── duplicate_card.py
-│       ├── audio_player.py
-│       ├── scan_progress.py
-│       └── filter_bar.py
+│       ├── ab_comparison.py    # Comparador auditivo A/B side-by-side en tiempo real
+│       ├── audio_player.py     # Motor de reproducción de audio con Pygame
+│       ├── bottom_player.py    # Barra de reproducción persistente en la parte inferior
+│       ├── delete_modal.py     # Modal de confirmación y seguridad para eliminación/backup
+│       ├── duplicate_card.py   # Tarjeta interactiva de grupo de duplicados
+│       ├── filter_bar.py       # Pestañas de filtrado, búsqueda y ordenación
+│       ├── library_view.py     # Vista de gestión completa de biblioteca indexada
+│       ├── quality_view.py     # Vista de auditoría espectral y salud de calidad
+│       ├── scan_progress.py    # Barra de progreso y estadísticas en tiempo real
+│       ├── scanner_view.py     # Vista interactiva de configuración y escaneo
+│       ├── settings_view.py    # Vista de configuración de motor y mantenimiento BD
+│       ├── sidebar.py          # Barra lateral de navegación con iconos QtAwesome
+│       └── stats_bar.py        # Barra superior con estadísticas globales
 └── tests/
-    ├── test_comparator.py
-    ├── test_quality.py
-    ├── test_clustering.py
-    └── test_end_to_end.py
+    ├── test_clustering.py      # Pruebas de agrupamiento Union-Find
+    ├── test_comparator.py      # Pruebas de comparación acústica y Hamming
+    ├── test_database.py        # Pruebas de base de datos SQLite y caché
+    ├── test_end_to_end.py      # Suite integral end-to-end con síntesis de audio
+    ├── test_performance.py     # Pruebas de rendimiento y estrés
+    └── test_quality.py         # Pruebas de detección de falsos lossless y FFT
 ```
 
-### Responsabilidades
+---
 
-- `main.py`: punto de entrada y selección entre GUI y CLI.
-- `core/models.py`: modelos de datos del dominio.
-- `core/fingerprint.py`: hashes, huellas acústicas y serialización.
-- `core/metadata_extractor.py`: metadata mediante Mutagen/FFprobe.
-- `core/quality_analyzer.py`: análisis espectral/FFT y evaluación de calidad.
-- `core/comparator.py`: comparación, alineamiento temporal y similitud de fingerprints.
-- `core/clustering.py`: formación de grupos de duplicados y ranking.
-- `core/database.py`: caché persistente SQLite y operaciones de persistencia.
-- `core/scanner.py`: recorrido de bibliotecas y procesamiento paralelo.
-- `core/file_manager.py`: mover, marcar y eliminar archivos.
-- `gui/app.py`: ventana principal y coordinación de la interfaz.
-- `gui/components/`: componentes visuales especializados.
-- `tests/`: pruebas unitarias, integración y end-to-end.
+## 3. Principio de Optimización Universal para Cualquier Computadora ⚡
 
-## 3. Flujo conceptual del sistema
+La aplicación **debe funcionar de manera rápida, ligera, estable y sin congelarse en cualquier ordenador**, ya sea:
+- Una laptop antigua con 2 o 4 núcleos de CPU, 4 GB de RAM y disco duro mecánico (HDD).
+- Una PC moderna de alto rendimiento con 16+ núcleos de CPU, 64 GB de RAM y SSD NVMe.
 
-El flujo esperado es aproximadamente:
+Para lograrlo, todo agente que modifique el código debe aplicar obligatoriamente los siguientes estándares:
+
+### A. Gestión Eficiente de CPU y Multiprocesamiento Adaptativo
+- **Detección y ajuste dinámico de hilos (`psutil` / `os.cpu_count()`):** Nunca saturar el 100% de los núcleos de forma indiscriminada si eso congela el sistema operativo del usuario. El valor por defecto debe ser adaptativo (`max(1, cpu_count - 1)`).
+- **Procesamiento por lotes (*Batching / Chunking*):** Enviar trabajos al `ProcessPoolExecutor` o cola de multiprocessing en fragmentos razonables (ej. 25 a 100 archivos por lote) para minimizar la sobrecarga de serialización IPC (*Inter-Process Communication*).
+- **Timeouts explícitos en subprocesos:** Toda llamada a `fpcalc.exe` o `ffmpeg` debe tener un `timeout` (ej. 15-30s) para evitar procesos zombies o bloqueos infinitos ante archivos dañados.
+
+### B. Consumo Mínimo de Memoria RAM (Streaming y Zero Leaks)
+- **Lectura por bloques (*Streaming I/O*):** Nunca cargar archivos de audio completos (un WAV de 500 MB o FLAC Hi-Res) en memoria para calcular hashes. Utilizar lectura en chunks de $64\text{ KB}$ a $1\text{ MB}$.
+- **Análisis FFT acotado:** Para el análisis espectral en `quality_analyzer.py`, analizar únicamente segmentos representativos (ej. 10 a 30 segundos centrales) en lugar de decodificar y transformar horas enteras de audio.
+- **Liberación de memoria y recolección de basura:** Limpiar estructuras intermedias y evitar retener listas masivas de buffers PCM sin necesidad.
+
+### C. Optimización de I/O en Disco (Soporte para HDDs lentos y SSDs rápidos)
+- **Modo SQLite WAL y transacciones por lote:**
+  - Base de datos configurada con `PRAGMA journal_mode=WAL;`, `PRAGMA synchronous=NORMAL;` y `PRAGMA cache_size=-64000;`.
+  - Inserciones y actualizaciones agrupadas en una única transacción (`BEGIN TRANSACTION ... COMMIT`) en lugar de hacer un `commit()` por cada canción.
+- **Evitar tormentas de I/O aleatorio:** Ordenar el procesamiento y las consultas para minimizar el movimiento de cabezales en discos mecánicos HDD.
+
+### D. Interfaz Gráfica Ligera y Reactiva (PyQt6)
+- **Cero bloqueos en el hilo principal:** Toda tarea de escaneo, cálculo pesado, FFT o acceso a disco debe ejecutarse en hilos secundarios (`QThread` / `ScannerWorker`).
+- **Paginación y renderizado perezoso (*Lazy Loading / Virtualization*):**
+  - Nunca instanciar 10,000 tarjetas de duplicados (`DuplicateGroupCard`) simultáneamente en la GUI; esto consumiría cientos de MBs de RAM y congelaría Qt.
+  - Implementar paginación (ej. lotes de 20 a 50 grupos por página) o renderizado bajo demanda al hacer scroll.
+- **Throttling de eventos de progreso:** Emitir señales de actualización de progreso con intervalos controlados (ej. cada 100-250 ms o cada $N$ archivos) para no saturar la cola de eventos de PyQt6.
+
+---
+
+## 4. Flujo Conceptual del Sistema
 
 ```text
-Biblioteca
+Biblioteca de Música
    ↓
-Descubrimiento de archivos
+[Fase 1] Descubrimiento rápido de archivos (os.scandir / mtime / size)
    ↓
-Consulta de caché SQLite
+[Fase 2] Consulta de Caché SQLite (Re-escaneo instantáneo en 0.01 ms si mtime coincide)
    ↓
-Extracción de metadata / hashes / fingerprint
+[Fase 3] Extracción paralela de Metadata, Hashes y Chromaprint (fpcalc)
    ↓
-Análisis de calidad cuando corresponde
+[Fase 4] Detección de Duplicados Exactos (SHA-256 y Audio PCM Hash)
    ↓
-Comparación de pistas candidatas
+[Fase 5] Comparación Acústica de Candidatos (Hamming Distance + Window Alignment)
    ↓
-Clustering de duplicados
+[Fase 6] Agrupamiento Disjunto (Union-Find)
    ↓
-Ranking del mejor archivo
+[Fase 7] Auditoría Espectral FFT & Scoring de Calidad (0 a 100)
    ↓
-Resultados GUI/CLI
+[Fase 8] Recomendación Automática [CONSERVAR] / [ELIMINAR]
    ↓
-Acción del usuario: conservar / mover / eliminar
+Presentación en GUI (PyQt6) o CLI con Ahorro de Espacio Calculado
+   ↓
+Acción Segura del Usuario (Mover a Respaldo / Eliminar con Confirmación)
 ```
 
-No asumir que todos los archivos necesitan el mismo nivel de procesamiento. Mantener los atajos y la caché que evitan trabajo innecesario.
+---
 
-## 4. Reglas de detección
+## 5. Reglas de Detección y Precisión
 
-El proyecto maneja tres niveles conceptuales:
+1. **Duplicado Exacto (100%)**:
+   - `EXACT_HASH`: Mismo SHA-256 bit-a-bit en disco.
+   - `EXACT_AUDIO`: Mismo hash de flujo PCM decodificado (mismo audio, diferentes tags ID3 o contenedor).
+2. **Duplicado Acústico ($\ge 95\%$)**:
+   - Misma grabación original analizada mediante huellas Chromaprint locales.
+   - Tolera variaciones de formato, bitrate (320k vs 128k), compresión y ganancia de volumen.
+3. **Posible Duplicado / Versión ($80\% - 94.9\%$)**:
+   - Remasters, radio edits, versiones extendidas, pistas en vivo.
+   - Se muestran como candidatos para revisión del usuario, nunca como equivalencias exactas.
 
-1. **Duplicado exacto (100%)**
-   - SHA-256 para copias idénticas en disco.
-   - Hash del flujo PCM para detectar el mismo audio aunque cambien tags ID3 o el contenedor.
+### Regla Crítica: Cero Falsos Positivos
+- **La precisión es sagrada:** Jamás agrupar canciones distintas simplemente porque son del mismo artista, álbum, año, duración similar o género.
+- El agrupamiento de Union-Find (`core/clustering.py`) debe mantener componentes conexas estrictas y validar que cada unión cumpla con los umbrales acústicos establecidos.
 
-2. **Duplicado acústico (>=95%)**
-   - Principalmente mediante huellas acústicas locales con Chromaprint/fpcalc.
-   - Debe tolerar diferencias de formato, bitrate, volumen y compresión cuando corresponda.
+---
 
-3. **Posible duplicado (80%-94%)**
-   - Puede representar remasters, radio edits, versiones extendidas, directos u otras variantes relacionadas.
-   - Estos resultados deben tratarse como candidatos y no como equivalencia exacta.
+## 6. Módulos Críticos y Políticas de Edición
 
-No cambiar estos umbrales sin revisar primero los tests y el impacto sobre falsos positivos y falsos negativos.
+### `core/fingerprint.py`
+- Extracción local con `fpcalc.exe`.
+- Manejo robusto de errores de decodificación y timeouts.
+- Conservar la serialización binaria compacta en SQLite para mantener la base de datos pequeña.
 
-## 5. Regla crítica: falsos positivos
+### `core/comparator.py`
+- Cálculo ultra-optimizado de distancia de Hamming entre sub-huellas acústicas mediante operaciones a nivel de bit (`popcount` / bitwise).
+- Alineamiento temporal con ventana deslizante (*sliding window*) para detectar audios desfasados o con silencios introductorios.
 
-La precisión es una propiedad central del proyecto. Nunca introducir una optimización que agrupe canciones distintas solamente porque pertenecen al mismo artista, álbum, género, duración aproximada o comparten características espectrales.
+### `core/quality_analyzer.py`
+- Análisis FFT eficiente calculando el *spectral rolloff* en el percentil 99% de energía.
+- Detección de Falsos Lossless (corte $<16\text{ kHz}$ o $<20\text{ kHz}$ en archivos `.flac` o `.wav`).
+- Fórmula de scoring transparente y equilibrada (fidelidad, bitrate, sample rate, bit depth, duración).
 
-La afirmación de diseño es que canciones diferentes no deben terminar agrupadas como duplicados por coincidencias débiles.
+### `core/database.py`
+- Persistencia SQLite con esquema indexado (`filepath`, `sha256`, `audio_hash`, `mtime`).
+- Soporte para migraciones seguras y métodos de optimización (`VACUUM`, `clear_cache`).
 
-Si se modifica el algoritmo de comparación o clustering, añadir o actualizar pruebas específicamente para canciones distintas.
+### `core/file_manager.py` (Zona de Máximo Riesgo ⚠️)
+- **Nunca eliminar archivos sin confirmación explícita.**
+- **Prohibido borrar pistas marcadas como `CONSERVAR` / `KEEP`.**
+- **Impedir eliminar todas las copias de un grupo:** siempre debe preservarse al menos una copia intacta.
+- Priorizar el traslado a carpetas de respaldo antes que la eliminación permanente.
+- Validar rutas contra ataques de *path traversal* o cadenas vacías.
 
-## 6. Fingerprinting
+---
 
-`core/fingerprint.py` es una zona crítica.
+## 7. GUI y Componentes Visuales (PyQt6)
 
-Reglas:
+- La interfaz sigue un diseño dark moderno y modularizado.
+- No colocar lógica de negocio pesada en las clases visuales de `gui/components/`.
+- Mantener la separación de responsabilidades:
+  - `LibraryView`: Exploración, filtrado y búsqueda.
+  - `ScannerView`: Configuración y monitoreo de escaneo en vivo.
+  - `DuplicatesView` & `DuplicateGroupCard`: Gestión de grupos y comparación.
+  - `QualityView`: Auditoría de calidad y salud espectral.
+  - `SettingsView`: Preferencias de motor y base de datos.
+  - `ABComparisonDialog`: Comparador auditivo A/B instantáneo.
+  - `BottomPlayerBar`: Reproductor global con Pygame.
+  - `DeleteModal`: Diálogo de seguridad con protección de borrado.
 
-- Mantener el fingerprint local siempre que sea posible.
-- No introducir dependencia de servicios externos sin una decisión explícita del proyecto.
-- No romper la compatibilidad entre fingerprints existentes y la caché SQLite.
-- Si cambia el formato de serialización o la información almacenada, evaluar migración/invalidez de caché.
-- Separar claramente hash de archivo, hash PCM y fingerprint acústico: no son equivalentes.
+---
 
-`fpcalc` se considera una dependencia importante del pipeline y el repositorio contempla un binario autónomo en `bin/fpcalc.exe`.
+## 8. CLI y Automatización
 
-- Ejecutar llamadas a binarios externos (`fpcalc`, `ffmpeg`, `ffprobe`) siempre con **timeouts explícitos** para evitar bloqueos por archivos colgados o problemas de I/O.
-- Aislar el manejo de excepciones ante archivos corruptos, truncados o con metadatos malformados (`MutagenError`, errores de decodificación): registrar advertencia en logs y continuar el escaneo sin abortar el lote.
+El punto de entrada `main.py` debe mantener total compatibilidad con:
+- `python main.py` (GUI interactiva).
+- `python main.py --folder <ruta>` (GUI con carpeta precargada).
+- `python main.py --cli --folder <ruta>` (Modo consola con tablas Rich).
+- `python main.py --cli --folder <ruta> --export-csv <archivo.csv>` (Exportación de datos).
+- `python main.py --cli --folder <ruta> --auto-move <carpeta>` (Mover duplicados inferiores).
+- `python main.py --cli --folder <ruta> --auto-move <carpeta> --dry-run` (Simulación segura).
 
-## 7. Comparación acústica
+---
 
-`core/comparator.py` debe conservar la distinción entre:
+## 9. Pruebas Obligatorias y Validación
 
-- identidad exacta;
-- similitud acústica alta;
-- similitud parcial/candidata.
-
-Antes de cambiar la distancia de Hamming, alineamiento temporal, normalización o puntuaciones:
-
-1. revisar `tests/test_comparator.py`;
-2. revisar `tests/test_end_to_end.py`;
-3. probar copias exactas;
-4. probar diferentes tags;
-5. probar formatos/bitrates distintos;
-6. probar versiones relacionadas;
-7. probar canciones completamente diferentes.
-
-No confundir una mejora en recall con una mejora real de calidad si aumenta los falsos positivos.
-
-## 8. Calidad y falsos lossless
-
-`core/quality_analyzer.py` analiza características espectrales mediante FFT para detectar archivos lossless que en realidad proceden de una fuente lossy.
-
-Debe distinguirse entre:
-
-- formato declarado;
-- calidad real estimada;
-- bitrate declarado/real;
-- ancho de banda espectral;
-- frecuencia de muestreo;
-- profundidad de bits;
-- integridad y duración.
-
-Los cortes espectrales son evidencia heurística, no una prueba absoluta del origen del archivo. No presentar una heurística como certeza científica sin validación adicional.
-
-## 9. Ranking del mejor archivo
-
-Cuando un grupo contiene varias copias, el ranking debe favorecer calidad real y utilidad, no simplemente el nombre de extensión.
-
-Considerar, según las reglas actuales del proyecto:
-
-- lossless auténtico frente a lossy;
-- falso lossless;
-- bitrate;
-- ancho de banda espectral;
-- sample rate;
-- bit depth;
-- duración/integridad.
-
-Un FLAC no debe considerarse automáticamente mejor que un MP3 si el FLAC es un transcode/falso lossless.
-
-## 10. Caché SQLite
-
-`core/database.py` mantiene la caché persistente.
-
-Reglas:
-
-- No invalidar o borrar la caché innecesariamente.
-- Preservar consistencia cuando se modifiquen modelos o fingerprints.
-- Tener en cuenta concurrencia y el modo WAL existente.
-- No asumir que una base SQLite puede compartirse entre múltiples procesos sin revisar cómo se gestionan las conexiones.
-- Si se cambia el esquema, contemplar compatibilidad con instalaciones existentes.
-
-El reescaneo de archivos sin cambios debe seguir aprovechando la caché.
-
-## 11. Multiprocessing y rendimiento
-
-`core/scanner.py` coordina el escaneo recursivo y el procesamiento paralelo.
-
-Al modificarlo:
-
-- evitar trabajo duplicado;
-- no cargar innecesariamente archivos completos en memoria;
-- conservar Pause/Resume/Cancel;
-- manejar correctamente excepciones de workers, garantizando que un fallo en un archivo individual no detenga el resto del escaneo;
-- evitar condiciones de carrera con la base de datos;
-- medir rendimiento antes y después de optimizaciones importantes.
-
-La aplicación está pensada para bibliotecas de decenas de miles de canciones, por lo que una solución correcta pero O(n²) sin justificación puede convertirse en un problema serio.
-
-## 12. Gestión de archivos: zona de máximo riesgo
-
-`core/file_manager.py` puede mover o eliminar archivos reales del usuario.
-
-Reglas obligatorias:
-
-- Nunca eliminar archivos automáticamente por una inferencia ambigua.
-- Mantener confirmaciones explícitas para eliminación permanente.
-- Respetar estrictamente las marcas de `[CONSERVAR]`.
-- Preferir mover a una carpeta de respaldo cuando la operación lo permita.
-- Validar rutas antes de operar.
-- Evitar path traversal y rutas accidentalmente vacías o raíz.
-- No ejecutar una operación destructiva durante una simple acción de análisis.
-- Si se modifica esta área, añadir pruebas de seguridad y de casos límite.
-
-## 13. GUI
-
-La GUI usa CustomTkinter y tiene componentes separados.
-
-Al modificar la interfaz:
-
-- no mover lógica de negocio compleja a la GUI si puede permanecer en `core/`;
-- mantener las operaciones largas fuera del hilo principal para no congelar la interfaz;
-- conservar actualización de progreso y estadísticas;
-- mantener filtros: Todos, Exactos, Acústicos y Posibles;
-- conservar el reproductor y la comparación cuando sean relevantes;
-- respetar la arquitectura de componentes existente.
-
-La GUI debe presentar claramente la diferencia entre duplicado confirmado y posible duplicado.
-
-## 14. CLI y automatización
-
-`main.py` soporta GUI y modo headless/CLI.
-
-Comandos documentados actualmente incluyen:
-
-```bash
-python main.py
-python main.py --folder "D:\MiMusica"
-python main.py --cli --folder "D:\MiMusica"
-python main.py --cli --folder "D:\MiMusica" --auto-move "D:\Duplicados_Backup"
-```
-
-Cualquier cambio en argumentos CLI debe conservar compatibilidad con los usos documentados o actualizar el README y las pruebas.
-
-## 15. Pruebas obligatorias
-
-Ejecutar la suite completa después de cambios relevantes:
+Ejecutar la suite completa tras cualquier cambio sustancial:
 
 ```bash
 python -m unittest discover tests
 ```
 
-Los escenarios importantes incluyen:
+### Directrices de pruebas:
+- **Audio sintético en memoria:** En pruebas unitarias (`test_comparator.py`, `test_quality.py`, `test_clustering.py`), generar tonos sinusoidales puros y barridos de frecuencia en memoria con `numpy` para que los tests se ejecuten en pocos milisegundos sin depender de archivos de disco pesados.
+- **Pruebas de no-regresión:** Asegurar que ninguna optimización rompa los casos límite (copias exactas, tags alterados, bitrates variados, falsos lossless y canciones distintas).
 
-- copias idénticas;
-- mismo audio con tags diferentes;
-- mismo audio en MP3 y FLAC;
-- mismo audio a diferentes bitrates;
-- falsos lossless;
-- remasterizaciones/variaciones de ganancia o EQ;
-- radio edits y pistas truncadas;
-- canciones distintas para validar ausencia de falsos positivos;
-- comportamiento de caché SQLite.
+---
 
-### Buenas prácticas de pruebas:
-- **Audio sintético para pruebas rápidas**: en pruebas unitarias (`test_comparator.py`, `test_quality.py`), priorizar generadores de audio sintético en memoria (ondas sinusoidales generadas programáticamente con `wave`/`numpy`) para mantener los tests rápidos y evitar inflar el repositorio con binarios.
-- **Muestras reales para E2E**: reservar muestras reales de audio únicamente para las pruebas de integración y end-to-end (`test_end_to_end.py`).
+## 10. Checklist de Calidad y Rendimiento para el Agente
 
-Si una modificación afecta varias capas, ejecutar la suite completa en lugar de confiar solamente en una prueba unitaria.
+Antes de dar por completada cualquier tarea, verificar:
+- [ ] ¿El cambio está optimizado para funcionar con fluidez en computadoras de bajos recursos?
+- [ ] ¿Se evita el consumo excesivo de memoria RAM mediante streaming o procesamiento en lotes?
+- [ ] ¿Las operaciones intensivas de CPU y disco están fuera del hilo principal de la GUI?
+- [ ] ¿Se preserva la regla de **cero falsos positivos**?
+- [ ] ¿Se garantiza la seguridad de los archivos del usuario en `file_manager.py`?
+- [ ] ¿Se mantiene el rendimiento de la caché SQLite WAL?
+- [ ] ¿Pasan todas las pruebas de `tests/`?
+- [ ] ¿La documentación (`README.md` / `SKILL.md`) refleja fielmente el comportamiento del código?
 
-## 16. Dependencias y entorno
+---
 
-El proyecto está orientado principalmente a Windows 10/11, aunque el README contempla Linux/macOS.
+## 11. Principio Rector
 
-Dependencias externas importantes:
-
-- Python 3.10+;
-- FFmpeg;
-- fpcalc/Chromaprint;
-- dependencias listadas en `requirements.txt`;
-- CustomTkinter;
-- Pygame;
-- Mutagen;
-- FFprobe cuando corresponda.
-
-No agregar una dependencia pesada para resolver un problema pequeño sin evaluar tamaño, compatibilidad, mantenimiento y rendimiento.
-
-## 17. Política de cambios para agentes
-
-Antes de editar código:
-
-1. Leer `README.md`.
-2. Identificar qué módulo es responsable del comportamiento.
-3. Revisar tests relacionados.
-4. Entender dependencias entre módulos.
-5. Hacer el cambio mínimo necesario.
-6. Ejecutar pruebas.
-7. Revisar efectos secundarios.
-8. Actualizar documentación si cambia el comportamiento público.
-
-Evitar refactors masivos cuando la tarea solamente requiere un cambio localizado.
-
-## 18. Cambios que requieren especial cuidado
-
-Solicitar o considerar una revisión explícita antes de cambiar de forma importante:
-
-- algoritmo de fingerprinting;
-- umbrales de similitud;
-- clustering;
-- análisis FFT;
-- esquema de SQLite;
-- multiprocessing;
-- operaciones de eliminación/movimiento;
-- contratos CLI;
-- formato de datos persistidos;
-- dependencias de `fpcalc`/FFmpeg.
-
-## 19. Qué NO hacer
-
-- No reemplazar el sistema acústico por comparación de filenames.
-- No declarar duplicado solamente por metadata.
-- No eliminar archivos solamente porque tengan menor bitrate.
-- No asumir que FLAC significa calidad superior.
-- No aumentar umbrales de similitud para solucionar falsos negativos sin medir falsos positivos.
-- No eliminar la caché para simplificar una implementación.
-- No bloquear la GUI con procesamiento pesado.
-- No introducir APIs externas sin autorización.
-- No modificar tests simplemente para que pasen si el comportamiento nuevo no está justificado.
-- No afirmar que una heurística de calidad demuestra con certeza el origen de un archivo.
-
-## 20. Estilo de desarrollo
-
-Preferir código claro, modular y fácil de probar. Mantener responsabilidades separadas entre dominio, persistencia, escaneo, gestión de archivos y presentación.
-
-Cuando sea posible, una nueva funcionalidad debe incluir:
-
-- implementación en el módulo apropiado;
-- prueba automatizada;
-- manejo de errores;
-- documentación si afecta al usuario;
-- consideración de rendimiento si procesa grandes bibliotecas.
-
-## 21. Checklist mental del agente
-
-Antes de finalizar cualquier cambio, comprobar:
-
-- ¿Puede crear falsos positivos?
-- ¿Puede marcar como duplicado una versión que no debería serlo?
-- ¿Puede borrar/mover un archivo incorrectamente?
-- ¿Rompe la caché?
-- ¿Rompe multiprocessing?
-- ¿Congela la GUI?
-- ¿Rompe CLI?
-- ¿Rompe una prueba existente?
-- ¿Aumenta significativamente el consumo de RAM/CPU?
-- ¿La documentación sigue describiendo el comportamiento real?
-
-Si alguna respuesta es sí, resolverlo antes de considerar terminado el cambio.
-
-## 22. Principio principal
-
-> La prioridad del proyecto es: **seguridad de los archivos > precisión de detección > estabilidad > rendimiento > nuevas funcionalidades**.
-
-Un agente debe preferir una detección conservadora y explicable antes que una agrupación agresiva que pueda provocar falsos positivos o pérdida accidental de archivos.
+> **Seguridad de Archivos > Precisión de Detección > Optimización Universal de Rendimiento > Estabilidad > Nuevas Funcionalidades.**
