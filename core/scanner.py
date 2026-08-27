@@ -133,6 +133,7 @@ class AudioScanner:
 
         # 1. Discover all audio files
         discovered_files: List[str] = []
+        last_walk_update = time.time()
         for root, _, files in os.walk(folder_path):
             if self._stop_event.is_set():
                 break
@@ -141,13 +142,24 @@ class AudioScanner:
                 if ext in SUPPORTED_EXTENSIONS:
                     discovered_files.append(os.path.join(root, f))
 
+            now = time.time()
+            if progress_callback and (now - last_walk_update > 0.15 or len(discovered_files) % 500 == 0):
+                self.stats.total_files_found = len(discovered_files)
+                self.stats.current_file = root
+                self.stats.elapsed_seconds = now - start_time
+                self.stats.phase = f"Descubriendo archivos ({len(discovered_files):,} encontrados)..."
+                progress_callback(self.stats)
+                last_walk_update = now
+
         self.stats.total_files_found = len(discovered_files)
+        self.stats.phase = f"Descubrimiento completado: {len(discovered_files):,} archivos encontrados"
         if progress_callback:
             progress_callback(self.stats)
 
         if not discovered_files or self._stop_event.is_set():
             self.stats.is_running = False
             return []
+
 
         # 2. Check Database Cache (Bulk in-memory check for instant speed on 40k+ files)
         self.stats.phase = "Verificando caché..."

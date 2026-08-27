@@ -248,7 +248,7 @@ QPushButton#nav_item:hover {{
     background-color: {COLORS['bg_card']};
     color: {COLORS['text_main']};
 }}
-QPushButton#nav_item_active {{
+QPushButton#nav_item:checked, QPushButton#nav_item_active {{
     background-color: {COLORS['bg_card']};
     color: {COLORS['cyan']};
     border: none;
@@ -258,6 +258,8 @@ QPushButton#nav_item_active {{
     padding: 10px 12px 10px 9px;
     font-weight: 700;
 }}
+
+
 
 /* ── Progress Bar ────────────────────────────────────────────── */
 QProgressBar {{
@@ -323,6 +325,89 @@ QTabBar::tab:hover {{
 }}
 QTabWidget::pane {{
     border: none;
+}}
+
+/* ── Table Widget ─────────────────────────────────────────────── */
+QTableWidget, QTableView {{
+    background-color: {COLORS['bg_main']};
+    color: {COLORS['text_main']};
+    gridline-color: {COLORS['border']};
+    border: 1px solid {COLORS['border']};
+    border-radius: 8px;
+    selection-background-color: {COLORS['cyan_bg']};
+    selection-color: {COLORS['text_main']};
+    font-size: 10pt;
+}}
+QTableWidget::item, QTableView::item {{
+    padding: 6px 10px;
+    border-bottom: 1px solid {COLORS['border']};
+}}
+QTableWidget::item:selected, QTableView::item:selected {{
+    background-color: {COLORS['cyan_bg']};
+    color: {COLORS['cyan']};
+}}
+QHeaderView::section {{
+    background-color: {COLORS['bg_card']};
+    color: {COLORS['text_muted']};
+    padding: 8px 10px;
+    font-weight: 700;
+    font-size: 8.5pt;
+    border: none;
+    border-bottom: 2px solid {COLORS['border']};
+    letter-spacing: 1px;
+}}
+
+/* ── Checkbox & Radio ────────────────────────────────────────── */
+QCheckBox {{
+    color: {COLORS['text_main']};
+    spacing: 8px;
+    font-size: 10pt;
+}}
+QCheckBox::indicator {{
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    border: 1px solid {COLORS['border']};
+    background-color: {COLORS['bg_darkest']};
+}}
+QCheckBox::indicator:hover {{
+    border-color: {COLORS['cyan_dim']};
+}}
+QCheckBox::indicator:checked {{
+    background-color: {COLORS['cyan']};
+    border-color: {COLORS['cyan']};
+}}
+
+/* ── SpinBox & Slider ────────────────────────────────────────── */
+QSpinBox, QDoubleSpinBox {{
+    background-color: {COLORS['bg_darkest']};
+    color: {COLORS['text_main']};
+    border: 1px solid {COLORS['border']};
+    border-radius: 6px;
+    padding: 5px 10px;
+}}
+QSpinBox:focus, QDoubleSpinBox:focus {{
+    border-color: {COLORS['cyan']};
+}}
+QSlider::groove:horizontal {{
+    height: 6px;
+    background: {COLORS['bg_card']};
+    border-radius: 3px;
+}}
+QSlider::sub-page:horizontal {{
+    background: {COLORS['cyan']};
+    border-radius: 3px;
+}}
+QSlider::handle:horizontal {{
+    background: {COLORS['cyan']};
+    border: 2px solid #FFFFFF;
+    width: 16px;
+    margin-top: -5px;
+    margin-bottom: -5px;
+    border-radius: 8px;
+}}
+QSlider::handle:horizontal:hover {{
+    background: #FFFFFF;
 }}
 
 /* ── Tooltips ────────────────────────────────────────────────── */

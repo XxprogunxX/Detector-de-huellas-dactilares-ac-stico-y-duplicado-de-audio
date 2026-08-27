@@ -237,14 +237,87 @@ class Database:
                     res.append(self._row_to_track(row))
         return res
 
-    def _row_to_track(self, row: tuple) -> AudioTrack:
+    def get_total_tracks_count(self) -> int:
+        """Returns the total number of cached tracks in the database."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM tracks")
+            row = cursor.fetchone()
+            return row[0] if row else 0
+
+    def get_database_size_bytes(self) -> int:
+        """Returns the file size of the SQLite database in bytes."""
+        if os.path.exists(self.db_path):
+            return os.path.getsize(self.db_path)
+        return 0
+
+    def clear_database(self):
+        """Clears all cached tracks and fingerprints."""
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM tracks;")
+            conn.execute("DELETE FROM sqlite_sequence WHERE name='tracks';")
+        self.vacuum_database()
+
+    def vacuum_database(self):
+        """Runs SQLite VACUUM to reclaim disk space."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        try:
+            conn.execute("VACUUM;")
+        finally:
+            conn.close()
+
+    def get_all_tracks(self, dir_prefix: Optional[str] = None, include_fingerprints: bool = False) -> List[AudioTrack]:
+        """Returns all tracks, optionally filtered by directory prefix. Fingerprint decompression is skipped by default for speed."""
+        res = []
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            fp_col = "fingerprint" if include_fingerprints else "NULL"
+            query = (
+                f"SELECT id, filepath, filesize, mtime, sha256, audio_hash, duration, format, "
+                f"bitrate, samplerate, channels, bit_depth, is_lossless, spectral_cutoff, "
+                f"fake_lossless_confidence, quality_score, quality_details, {fp_col}, title, artist, album "
+                f"FROM tracks"
+            )
+            params = ()
+            if dir_prefix:
+                clean_pref = dir_prefix.replace("\\", "/").rstrip("/") + "%"
+                query += " WHERE REPLACE(filepath, char(92), char(47)) LIKE ?"
+                params = (clean_pref,)
+            cursor.execute(query, params)
+            for row in cursor.fetchall():
+                res.append(self._row_to_track(row, decompress_fp=include_fingerprints))
+        return res
+
+    def get_format_statistics(self, dir_prefix: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+        """Returns format counts and total size per format."""
+        stats = {}
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            query = "SELECT format, COUNT(*), SUM(filesize) FROM tracks"
+            params = ()
+            if dir_prefix:
+                clean_pref = dir_prefix.replace("\\", "/").rstrip("/") + "%"
+                query += " WHERE REPLACE(filepath, char(92), char(47)) LIKE ?"
+                params = (clean_pref,)
+            query += " GROUP BY format"
+            cursor.execute(query, params)
+            for row in cursor.fetchall():
+                fmt = row[0] or "UNKNOWN"
+                stats[fmt.upper()] = {
+                    "count": row[1],
+                    "total_bytes": row[2] or 0
+                }
+        return stats
+
+
+    def _row_to_track(self, row: tuple, decompress_fp: bool = True) -> AudioTrack:
         (
             tid, filepath, filesize, mtime, sha256, audio_hash, duration, fmt,
             bitrate, samplerate, channels, bit_depth, is_lossless, spectral_cutoff,
             fake_lossless_confidence, quality_score, quality_details, fp_blob, title, artist, album
         ) = row
         
-        raw_fp = decompress_fingerprint(fp_blob) if fp_blob else []
+        raw_fp = (decompress_fingerprint(fp_blob) if fp_blob else []) if decompress_fp else []
         return AudioTrack(
             id=tid,
             filepath=filepath,
@@ -268,3 +341,5 @@ class Database:
             artist=artist or "",
             album=album or ""
         )
+
+

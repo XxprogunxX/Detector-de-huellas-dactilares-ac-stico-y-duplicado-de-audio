@@ -43,35 +43,62 @@ class StorageBar(QFrame):
         self.bar.setTextVisible(False)
         layout.addWidget(self.bar)
 
-    def set_values(self, used_gb: float, total_gb: float):
-        pct = int((used_gb / max(total_gb, 0.001)) * 100)
+    def set_values(self, used_bytes: float, total_bytes: float, label_prefix: str = "Disco"):
+        if total_bytes <= 0:
+            self.bar.setValue(0)
+            self.lbl_size.setText("— / —")
+            return
+        
+        pct = min(100, max(0, int((used_bytes / total_bytes) * 100)))
         self.bar.setValue(pct)
-        self.lbl_size.setText(f"{used_gb:.1f} / {total_gb:.1f} TB")
+        
+        def _fmt(b):
+            gb = b / (1024 ** 3)
+            if gb >= 1000:
+                return f"{gb / 1024:.1f} TB"
+            return f"{gb:.1f} GB"
+
+        self.lbl_title.setText(label_prefix)
+        self.lbl_size.setText(f"{_fmt(used_bytes)} / {_fmt(total_bytes)}")
+
+    def update_from_folder(self, folder_path: str, music_bytes: float = 0):
+        import shutil
+        import os
+        if folder_path and os.path.exists(folder_path):
+            try:
+                usage = shutil.disk_usage(folder_path)
+                self.set_values(usage.used, usage.total, label_prefix="Almacenamiento")
+            except Exception:
+                self.set_values(0, 0)
+        else:
+            self.set_values(0, 0)
 
 
 class NavButton(QPushButton):
     def __init__(self, icon_name: str, label: str, active: bool = False, parent=None):
         super().__init__(parent)
+        self.setObjectName("nav_item")
         self._label = label
         self._icon_name = icon_name
-        self._active = active
-        self._update_style()
         self.setText(f"  {label}")
         self.setFixedHeight(40)
+        self.setCheckable(True)
+        self.setChecked(active)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.toggled.connect(self._on_toggled)
+        self._update_icon()
+
+    def _on_toggled(self, checked: bool):
+        self._update_icon()
 
     def set_active(self, active: bool):
-        self._active = active
-        self._update_style()
-        color = COLORS["cyan"] if active else COLORS["text_muted"]
+        self.setChecked(active)
+        self._update_icon()
+
+    def _update_icon(self):
+        color = COLORS["cyan"] if self.isChecked() else COLORS["text_muted"]
         self.setIcon(qta.icon(self._icon_name, color=color))
 
-    def _update_style(self):
-        name = "nav_item_active" if self._active else "nav_item"
-        self.setObjectName(name)
-        self.setStyleSheet("")  # Force QSS re-evaluation
-        color = COLORS["cyan"] if self._active else COLORS["text_muted"]
-        self.setIcon(qta.icon(self._icon_name, color=color))
 
 
 class Sidebar(QWidget):
@@ -129,17 +156,22 @@ class Sidebar(QWidget):
         root.addWidget(nav_label)
 
         # ── Nav buttons ────────────────────────────────────────────
+        from PyQt6.QtWidgets import QButtonGroup
+        self.btn_group = QButtonGroup(self)
+        self.btn_group.setExclusive(True)
         self._nav_buttons: dict[str, NavButton] = {}
         self._current_section = "Duplicados"
 
         for icon_name, label in self.SECTIONS:
-            active = label == self._current_section
+            active = (label == self._current_section)
             btn = NavButton(icon_name, label, active=active)
             btn.clicked.connect(lambda checked, s=label: self._on_nav_click(s))
+            self.btn_group.addButton(btn)
             self._nav_buttons[label] = btn
             root.addWidget(btn)
 
-        root.addSpacing(12)
+        # ── Spacer pushing folder & storage to bottom ──────────────
+        root.addStretch()
 
         # Thin separator
         sep2 = QFrame()
@@ -149,7 +181,7 @@ class Sidebar(QWidget):
 
         root.addSpacing(8)
 
-        # ── Folder selector ────────────────────────────────────────
+        # ── Folder selector (at bottom above storage bar) ──────────
         folder_label = QLabel("  CARPETA ACTIVA")
         folder_label.setObjectName("section_label")
         folder_label.setFixedHeight(24)
@@ -171,7 +203,7 @@ class Sidebar(QWidget):
         btn_folder.clicked.connect(self.folder_requested.emit)
         root.addWidget(btn_folder)
 
-        root.addStretch()
+        root.addSpacing(8)
 
         # ── Storage bar ────────────────────────────────────────────
         sep3 = QFrame()
@@ -181,6 +213,7 @@ class Sidebar(QWidget):
 
         self.storage_bar = StorageBar()
         root.addWidget(self.storage_bar)
+
 
         # ── Version tag ────────────────────────────────────────────
         version_frame = QFrame()
@@ -197,16 +230,16 @@ class Sidebar(QWidget):
         root.addWidget(version_frame)
 
     def _on_nav_click(self, section: str):
-        if section == self._current_section:
-            return
-        self._nav_buttons[self._current_section].set_active(False)
         self._current_section = section
-        self._nav_buttons[section].set_active(True)
+        if section in self._nav_buttons:
+            self._nav_buttons[section].setChecked(True)
         self.nav_changed.emit(section)
 
     def set_active_section(self, section: str):
         if section in self._nav_buttons:
-            self._on_nav_click(section)
+            self._current_section = section
+            self._nav_buttons[section].setChecked(True)
+            self._nav_buttons[section]._update_icon()
 
     def set_folder(self, path: str):
         if path:
@@ -214,3 +247,4 @@ class Sidebar(QWidget):
             self.lbl_folder.setText(display)
         else:
             self.lbl_folder.setText("Sin seleccionar")
+

@@ -86,11 +86,54 @@ class TestDatabaseCache(unittest.TestCase):
         t = tracks[0]
         self.assertEqual(t.filepath, '/fake/path/song.flac')
         
-        # Since 'is_fake_lossless' (1) was renamed to 'fake_lossless_confidence', 
-        # it will be read as 1.0 (float) which is fine for backward compatibility testing,
-        # or we just need to ensure the schema didn't crash.
         self.assertEqual(t.fake_lossless_confidence, 1.0)
         self.assertEqual(t.spectral_cutoff, 15800.0)
 
+    def test_database_helper_methods(self):
+        track1 = AudioTrack(
+            filepath="/music/rock/song1.mp3",
+            filesize=3500000,
+            mtime=1620000000.0,
+            format="MP3",
+            bitrate=320,
+            title="Song 1",
+            artist="Artist A"
+        )
+        track2 = AudioTrack(
+            filepath="/music/rock/song2.flac",
+            filesize=25000000,
+            mtime=1620000100.0,
+            format="FLAC",
+            bitrate=900,
+            is_lossless=True,
+            title="Song 2",
+            artist="Artist B"
+        )
+        self.db.upsert_tracks_batch([track1, track2])
+
+        # Test count
+        self.assertEqual(self.db.get_total_tracks_count(), 2)
+
+        # Test format stats
+        stats = self.db.get_format_statistics()
+        self.assertIn("MP3", stats)
+        self.assertIn("FLAC", stats)
+        self.assertEqual(stats["MP3"]["count"], 1)
+        self.assertEqual(stats["FLAC"]["count"], 1)
+
+        # Test get_all_tracks
+        tracks = self.db.get_all_tracks()
+        self.assertEqual(len(tracks), 2)
+
+        # Test db size and vacuum
+        size = self.db.get_database_size_bytes()
+        self.assertGreater(size, 0)
+        self.db.vacuum_database()
+
+        # Test clear
+        self.db.clear_database()
+        self.assertEqual(self.db.get_total_tracks_count(), 0)
+
 if __name__ == '__main__':
     unittest.main()
+
