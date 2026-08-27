@@ -156,6 +156,13 @@ def cluster_duplicates(
                     pair_hits[(p1, p2)] += 1
 
     candidate_pairs_set = set()
+
+    # Cap pair_hits to avoid unbounded memory growth on very large libraries (100k+ tracks)
+    MAX_PAIRS = 500_000
+    if len(pair_hits) > MAX_PAIRS:
+        # Keep the pairs with highest hit count (most likely true duplicates)
+        pair_hits = dict(sorted(pair_hits.items(), key=lambda x: x[1], reverse=True)[:MAX_PAIRS])
+
     for (idx_a, idx_b), hits in pair_hits.items():
         t_a = tracks[idx_a]
         t_b = tracks[idx_b]
@@ -183,7 +190,9 @@ def cluster_duplicates(
         chunk_size = min(1000, max(50, total_comparisons_est // (max_workers * 6) + 1))
         chunks = [pairs_to_compare[i:i + chunk_size] for i in range(0, total_comparisons_est, chunk_size)]
         
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # max_tasks_per_child=200: recycle worker processes periodically to prevent
+        # memory leaks from numpy/ffmpeg accumulated buffers in long-running scans.
+        with ProcessPoolExecutor(max_workers=max_workers, max_tasks_per_child=200) as executor:
             futures = [executor.submit(_compare_chunk_worker, chunk) for chunk in chunks]
             
             for future in as_completed(futures):

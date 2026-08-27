@@ -4,6 +4,7 @@ SQLite Database caching engine for Audio Tracks, Fingerprints and Metadata.
 
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from typing import Optional, List, Dict, Any
 from core.models import AudioTrack
@@ -33,18 +34,45 @@ class Database:
         else:
             self.db_path = db_path
 
+        # Persistent connection reused across all operations (thread-safe via lock)
+        self._lock = threading.Lock()
+        self._conn: Optional[sqlite3.Connection] = None
+        self._open_connection()
         self.init_db()
+
+    def _open_connection(self):
+        """Opens the persistent SQLite connection with performance-tuned PRAGMAs."""
+        self._conn = sqlite3.connect(self.db_path, timeout=30.0, check_same_thread=False)
+        # WAL mode: concurrent reads + writes without blocking
+        self._conn.execute("PRAGMA journal_mode = WAL;")
+        # NORMAL sync: safe and fast (only fsync on WAL checkpoint)
+        self._conn.execute("PRAGMA synchronous = NORMAL;")
+        # 32 MB in-memory page cache → repeated reads served from RAM, not disk
+        self._conn.execute("PRAGMA cache_size = -32000;")
+        # Temp tables and indexes in memory instead of a temp file
+        self._conn.execute("PRAGMA temp_store = MEMORY;")
+        # 256 MB memory-mapped I/O: large sequential reads bypass syscall overhead
+        self._conn.execute("PRAGMA mmap_size = 268435456;")
 
     @contextmanager
     def _get_connection(self):
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
-        conn.execute("PRAGMA journal_mode = WAL;")  # Fast concurrent writes
-        conn.execute("PRAGMA synchronous = NORMAL;")
-        try:
-            yield conn
-            conn.commit()
-        finally:
-            conn.close()
+        """Thread-safe context manager that reuses the persistent connection."""
+        with self._lock:
+            if self._conn is None:
+                self._open_connection()
+            try:
+                yield self._conn
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def close(self):
+        """Closes the persistent connection (call on app exit)."""
+        with self._lock:
+            if self._conn:
+                self._conn.close()
+                self._conn = None
 
     def init_db(self):
         """Initializes tables and high-speed indexes."""
@@ -103,12 +131,15 @@ class Database:
         return lookup
 
     def get_lightweight_cache_lookup(self) -> Dict[str, tuple]:
-        """Returns a fast lookup dict of (filesize, mtime) indexed by filepath, avoiding full load."""
+        """Returns a fast lookup dict of (filesize, mtime) indexed by filepath.
+        Uses cursor iteration (not fetchall) to avoid loading the entire table into RAM.
+        """
         lookup = {}
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT filepath, filesize, mtime FROM tracks")
-            for row in cursor.fetchall():
+            # Iterate the cursor row-by-row to keep peak RAM low on large libraries
+            for row in cursor:
                 lookup[row[0]] = (row[1], row[2])
         return lookup
 
