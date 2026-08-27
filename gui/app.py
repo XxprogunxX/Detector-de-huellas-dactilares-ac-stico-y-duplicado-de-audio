@@ -555,6 +555,20 @@ class AudioDuplicateDetectorApp(QMainWindow):
             QMessageBox.information(self, "Acción completada", msg)
             self._refresh_view()
 
+    def closeEvent(self, event):
+        """Properly clean up resources on window close."""
+        self._save_current_session()
+        # Stop any running scan
+        if self.worker and self.worker.isRunning():
+            self.scanner.stop()
+            self.worker.wait(2000)
+        # Close the persistent SQLite connection gracefully
+        try:
+            self.db.close()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Entry point
