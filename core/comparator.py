@@ -4,7 +4,7 @@ Acoustic Fingerprint Comparison and Alignment Engine.
 
 from typing import List, Tuple, Optional
 import numpy as np
-from core.models import AudioTrack, ComparisonResult, DuplicateType
+from core.models import AudioTrack, EvidenceReport, DuplicateType
 
 
 def popcount32(x: int) -> int:
@@ -93,92 +93,119 @@ def compare_raw_fingerprints(
     return max_similarity, best_offset
 
 
-def compare_tracks(track_a: AudioTrack, track_b: AudioTrack) -> ComparisonResult:
+def compare_tracks(track_a: AudioTrack, track_b: AudioTrack) -> EvidenceReport:
     """
     Compares two tracks across all detection tiers (File Hash, PCM Hash, Acoustic Fingerprint).
-    
-    Returns:
-        ComparisonResult with similarity score, duplicate type, and human explanation.
+    Returns an EvidenceReport with multiple signals and explained confidence.
     """
+    report = EvidenceReport(
+        track_a_path=track_a.filepath,
+        track_b_path=track_b.filepath,
+        classification=DuplicateType.NO_MATCH,
+        confidence=0.0
+    )
+
     # 1. Exact Binary File Hash
     if track_a.sha256 and track_b.sha256 and track_a.sha256 == track_b.sha256:
-        return ComparisonResult(
-            track_a_path=track_a.filepath,
-            track_b_path=track_b.filepath,
-            similarity=1.0,
-            duplicate_type=DuplicateType.EXACT_HASH,
-            duration_diff=0.0,
-            reason="Duplicado Exacto: Archivos idénticos byte por byte (mismo hash SHA-256)."
-        )
+        report.is_exact_hash = True
+        report.confidence = 100.0
+        report.classification = DuplicateType.EXACT_HASH
+        report.reasons.append("Duplicado Exacto: Archivos idénticos byte por byte (mismo hash SHA-256).")
+        return report
 
     # 2. Exact Decoded PCM Audio Hash
     if track_a.audio_hash and track_b.audio_hash and track_a.audio_hash == track_b.audio_hash:
-        return ComparisonResult(
-            track_a_path=track_a.filepath,
-            track_b_path=track_b.filepath,
-            similarity=1.0,
-            duplicate_type=DuplicateType.EXACT_AUDIO,
-            duration_diff=abs(track_a.duration - track_b.duration),
-            reason="Duplicado de Audio Exacto: Misma señal PCM decodificada (diferente contenedor o etiquetas ID3)."
-        )
+        report.is_exact_audio = True
+        report.duration_diff = abs(track_a.duration - track_b.duration)
+        report.confidence = 100.0
+        report.classification = DuplicateType.EXACT_AUDIO
+        report.reasons.append("Duplicado de Audio Exacto: Misma señal PCM decodificada (diferente contenedor o etiquetas ID3).")
+        return report
 
     # 3. Duration Pre-filtering
     duration_diff = abs(track_a.duration - track_b.duration)
+    report.duration_diff = duration_diff
     if duration_diff > 90.0:  # More than 1.5 min difference is likely completely different
-        return ComparisonResult(
-            track_a_path=track_a.filepath,
-            track_b_path=track_b.filepath,
-            similarity=0.0,
-            duplicate_type=DuplicateType.NO_MATCH,
-            duration_diff=duration_diff,
-            reason="Audios distintos (diferencia de duración > 90 segundos)."
-        )
+        report.confidence = 0.0
+        report.classification = DuplicateType.NO_MATCH
+        report.reasons.append("Audios distintos (diferencia de duración > 90 segundos).")
+        return report
 
     # 4. Acoustic Fingerprint Comparison
     if not track_a.fingerprint_raw or not track_b.fingerprint_raw:
-        return ComparisonResult(
-            track_a_path=track_a.filepath,
-            track_b_path=track_b.filepath,
-            similarity=0.0,
-            duplicate_type=DuplicateType.NO_MATCH,
-            duration_diff=duration_diff,
-            reason="No fue posible comparar huellas acústicas."
-        )
+        report.confidence = 0.0
+        report.classification = DuplicateType.UNCERTAIN
+        report.reasons.append("Incierto: No fue posible comparar huellas acústicas (fpcalc falló).")
+        return report
 
     similarity, offset = compare_raw_fingerprints(track_a.fingerprint_raw, track_b.fingerprint_raw)
+    report.chromaprint_similarity = similarity
+    report.temporal_offset_frames = offset
 
-    # 5. Classification Rules
-    if similarity >= 0.98 and duration_diff <= 2.0:
-        return ComparisonResult(
-            track_a_path=track_a.filepath,
-            track_b_path=track_b.filepath,
-            similarity=similarity,
-            duplicate_type=DuplicateType.ACOUSTIC_DUPLICATE,
-            duration_diff=duration_diff,
-            reason=f"Duplicado Acústico ({similarity*100:.1f}%): Misma grabación original en diferente formato/bitrate/volumen."
-        )
-    elif similarity >= 0.80:
-        # Possible variations: Remaster, Radio Edit, Live, Extended
-        sub_reason = "Posible Duplicado (Variante): "
-        if duration_diff > 2.0:
-            sub_reason += f"Variación de duración (Δ{duration_diff:.1f}s - posible radio edit / versión extendida / directo)."
-        else:
-            sub_reason += "Variación acústica (posible remasterización o edición con diferente ecualización/compresión)."
+    # Metadata Match Check
+    metadata_match = (
+        track_a.format == track_b.format and 
+        track_a.samplerate == track_b.samplerate and 
+        track_a.channels == track_b.channels and 
+        track_a.bitrate == track_b.bitrate
+    )
+    report.metadata_match = metadata_match
 
-        return ComparisonResult(
-            track_a_path=track_a.filepath,
-            track_b_path=track_b.filepath,
-            similarity=similarity,
-            duplicate_type=DuplicateType.POSSIBLE_DUPLICATE,
-            duration_diff=duration_diff,
-            reason=f"{sub_reason} ({similarity*100:.1f}% similitud)."
-        )
+    # Spectral Diff
+    if track_a.spectral_cutoff > 0.0 and track_b.spectral_cutoff > 0.0:
+        spectral_diff = abs(track_a.spectral_cutoff - track_b.spectral_cutoff)
+        report.spectral_diff = spectral_diff
     else:
-        return ComparisonResult(
-            track_a_path=track_a.filepath,
-            track_b_path=track_b.filepath,
-            similarity=similarity,
-            duplicate_type=DuplicateType.NO_MATCH,
-            duration_diff=duration_diff,
-            reason=f"Pistas diferentes ({similarity*100:.1f}% similitud acústica)."
+        report.reasons.append("Espectro: N/A (Faltan datos espectrales en una de las pistas)")
+
+    # 5. Evidence Engine Combination Formula
+    # Base Confidence
+    base_confidence = similarity * 100.0
+    
+    # Modifier 1: Temporal Alignment Bonus (max +3.0)
+    # Linearly decays from +3.0 (at 0 frames) to 0.0 (at 15 frames)
+    offset_bonus = max(0.0, 3.0 * (1.0 - abs(offset) / 15.0))
+    
+    # Modifier 2: Duration Bonus/Penalty
+    # Bonus decays from +2.0 (0s) to 0.0 (2.0s)
+    duration_bonus = max(0.0, 2.0 * (1.0 - duration_diff / 2.0))
+    # Penalty starts at 10.0s (0.0) and scales to 30.0s (-10.0)
+    duration_penalty = 0.0
+    if duration_diff >= 10.0:
+        duration_penalty = max(-10.0, -10.0 * ((duration_diff - 10.0) / 20.0))
+        
+    # Modifier 3: Spectral Bonus (max +1.0)
+    # Linearly decays from +1.0 (0Hz diff) to 0.0 (1000Hz diff)
+    spectral_bonus = 0.0
+    if report.spectral_diff is not None:
+        spectral_bonus = max(0.0, 1.0 * (1.0 - report.spectral_diff / 1000.0))
+
+    total_delta = offset_bonus + duration_bonus + duration_penalty + spectral_bonus
+    final_confidence = base_confidence + total_delta
+    
+    # Limit between 0.0 and 99.9
+    final_confidence = max(0.0, min(99.9, final_confidence))
+    report.confidence = final_confidence
+
+    if total_delta != 0.0:
+        report.reasons.append(
+            f"Confidence ajustada por señales secundarias: base {base_confidence:.1f}% "
+            f"{'+' if total_delta >= 0 else ''}{total_delta:.1f}% "
+            f"(alineamiento={offset_bonus:.1f}, duración={duration_bonus+duration_penalty:.1f}, espectro={spectral_bonus:.1f})"
         )
+
+    # 6. Final Classification Rules
+    if final_confidence >= 95.0:
+        report.classification = DuplicateType.ACOUSTIC_DUPLICATE
+        report.reasons.append(f"Duplicado Acústico ({final_confidence:.1f}%): Misma grabación original.")
+    elif final_confidence >= 80.0:
+        report.classification = DuplicateType.POSSIBLE_DUPLICATE
+        if duration_diff > 2.0:
+            report.reasons.append(f"Posible Duplicado ({final_confidence:.1f}%): Variación de duración (posible versión extendida/directo).")
+        else:
+            report.reasons.append(f"Posible Duplicado ({final_confidence:.1f}%): Variación acústica (posible remasterización o transcodificación).")
+    else:
+        report.classification = DuplicateType.NO_MATCH
+        report.reasons.append(f"Pistas diferentes ({final_confidence:.1f}%).")
+
+    return report

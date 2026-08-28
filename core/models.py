@@ -14,6 +14,7 @@ class DuplicateType(str, Enum):
     ACOUSTIC_DUPLICATE = "ACOUSTIC_DUPLICATE"# >= 95% Acoustic similarity (same recording)
     POSSIBLE_DUPLICATE = "POSSIBLE_DUPLICATE"# 80% - 94.9% or duration variance (remaster, edit, live)
     NO_MATCH = "NO_MATCH"                    # Distinct audio
+    UNCERTAIN = "UNCERTAIN"                  # Missing signals, could not compare
 
 
 class FileAction(str, Enum):
@@ -125,7 +126,7 @@ class AudioTrack:
             fake_lossless_confidence=float(data.get("fake_lossless_confidence", 0.0)),
             quality_score=data.get("quality_score", 0.0),
             quality_details=data.get("quality_details", ""),
-            fingerprint_raw=[],
+            fingerprint_raw=data.get("fingerprint_raw", []),
             title=data.get("title", ""),
             artist=data.get("artist", ""),
             album=data.get("album", ""),
@@ -134,13 +135,23 @@ class AudioTrack:
 
 
 @dataclass
-class ComparisonResult:
+class EvidenceReport:
     track_a_path: str
     track_b_path: str
-    similarity: float
-    duplicate_type: DuplicateType
-    duration_diff: float
-    reason: str
+    classification: DuplicateType
+    confidence: float  # 0.0 to 100.0
+    
+    # Raw signals
+    is_exact_hash: bool = False
+    is_exact_audio: bool = False
+    chromaprint_similarity: Optional[float] = None
+    temporal_offset_frames: Optional[int] = None
+    duration_diff: Optional[float] = None
+    spectral_diff: Optional[float] = None
+    metadata_match: Optional[bool] = None
+    
+    # Human readable explanation
+    reasons: List[str] = field(default_factory=list)
 
 
 @dataclass

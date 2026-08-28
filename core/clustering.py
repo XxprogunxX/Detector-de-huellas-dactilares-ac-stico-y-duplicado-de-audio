@@ -6,16 +6,17 @@ from typing import List, Dict, Set, Tuple, Optional
 from collections import defaultdict
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import itertools
 
-from core.models import AudioTrack, DuplicateGroup, DuplicateType, FileAction, ComparisonResult
+from core.models import AudioTrack, DuplicateGroup, DuplicateType, FileAction, EvidenceReport
 from core.comparator import compare_tracks
 
 
-def _compare_chunk_worker(pairs: List[Tuple[AudioTrack, AudioTrack]]) -> List[ComparisonResult]:
+def _compare_chunk_worker(pairs: List[Tuple[AudioTrack, AudioTrack]]) -> List[EvidenceReport]:
     results = []
     for t_a, t_b in pairs:
         res = compare_tracks(t_a, t_b)
-        if res.duplicate_type != DuplicateType.NO_MATCH:
+        if res.classification != DuplicateType.NO_MATCH:
             results.append(res)
     return results
 
@@ -66,7 +67,7 @@ def cluster_duplicates(
 
     track_map: Dict[str, AudioTrack] = {t.filepath: t for t in tracks}
     ds = DisjointSet()
-    pair_results: Dict[Tuple[str, str], ComparisonResult] = {}
+    pair_results: Dict[Tuple[str, str], EvidenceReport] = {}
 
     # Step 1: Instant Exact Hash Clustering (O(N))
     # Step 1: Exact Matches (SHA256 and PCM Hash)
@@ -80,14 +81,14 @@ def cluster_duplicates(
             for i in range(len(group)):
                 for j in range(i + 1, len(group)):
                     ds.union(group[i].filepath, group[j].filepath)
-                    # We can directly create a ComparisonResult for exact matches
-                    pair_results[(group[i].filepath, group[j].filepath)] = ComparisonResult(
+                    # We can directly create an EvidenceReport for exact matches
+                    pair_results[(group[i].filepath, group[j].filepath)] = EvidenceReport(
                         track_a_path=group[i].filepath,
                         track_b_path=group[j].filepath,
-                        similarity=1.0,
-                        duplicate_type=DuplicateType.EXACT_HASH,
-                        duration_diff=0.0,
-                        reason="Duplicado Exacto: El archivo es idéntico bit a bit (SHA-256)."
+                        classification=DuplicateType.EXACT_HASH,
+                        confidence=100.0,
+                        is_exact_hash=True,
+                        reasons=["Duplicado Exacto: Archivos idénticos byte por byte (mismo hash SHA-256)."]
                     )
 
     hash_groups = defaultdict(list)
@@ -101,13 +102,13 @@ def cluster_duplicates(
             for other in group[1:]:
                 ds.union(first, other.filepath)
                 if (first, other.filepath) not in pair_results:
-                    pair_results[(first, other.filepath)] = ComparisonResult(
+                    pair_results[(first, other.filepath)] = EvidenceReport(
                         track_a_path=first,
                         track_b_path=other.filepath,
-                        similarity=1.0,
-                        duplicate_type=DuplicateType.EXACT_AUDIO,
-                        duration_diff=abs(group[0].duration - other.duration),
-                        reason="Duplicado de Audio Exacto: Misma señal PCM decodificada."
+                        classification=DuplicateType.EXACT_AUDIO,
+                        confidence=100.0,
+                        is_exact_audio=True,
+                        reasons=["Duplicado de Audio Exacto: Misma señal PCM decodificada (diferente contenedor o etiquetas ID3)."]
                     )
 
     # Step 2: High-Precision Subfingerprint Index with Duration Bucketing
@@ -247,7 +248,8 @@ def cluster_duplicates(
 
         # Determine primary duplicate type and average similarity
         types_in_group = set()
-        sim_scores = []
+        total_sim = 0.0
+        pair_count = 0
 
         for i in range(len(group_tracks)):
             for j in range(i + 1, len(group_tracks)):
@@ -255,10 +257,11 @@ def cluster_duplicates(
                 p2 = group_tracks[j].filepath
                 res = pair_results.get((p1, p2)) or pair_results.get((p2, p1))
                 if res:
-                    types_in_group.add(res.duplicate_type)
-                    sim_scores.append(res.similarity)
-
-        avg_sim = (sum(sim_scores) / len(sim_scores) * 100.0) if sim_scores else 100.0
+                    types_in_group.add(res.classification)
+                    total_sim += res.confidence / 100.0
+                    pair_count += 1
+        
+        avg_sim = (total_sim / pair_count) * 100.0 if pair_count > 0 else 100.0
 
         if DuplicateType.EXACT_HASH in types_in_group and len(types_in_group) == 1:
             primary_type = DuplicateType.EXACT_HASH

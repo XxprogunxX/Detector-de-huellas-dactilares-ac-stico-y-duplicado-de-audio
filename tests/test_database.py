@@ -11,6 +11,7 @@ class TestDatabaseCache(unittest.TestCase):
         self.db = Database(db_path=self.temp_db_path)
 
     def tearDown(self):
+        self.db.close()
         os.close(self.temp_db_fd)
         if os.path.exists(self.temp_db_path):
             os.remove(self.temp_db_path)
@@ -88,6 +89,7 @@ class TestDatabaseCache(unittest.TestCase):
         
         self.assertEqual(t.fake_lossless_confidence, 1.0)
         self.assertEqual(t.spectral_cutoff, 15800.0)
+        migrated_db.close()
 
     def test_database_helper_methods(self):
         track1 = AudioTrack(

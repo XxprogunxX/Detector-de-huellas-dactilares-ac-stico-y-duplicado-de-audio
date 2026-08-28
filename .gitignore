@@ -23,3 +23,10 @@ dist/
 .idea/
 .vscode/
 .DS_Store
+
+scratch
+
+scratch_SongA.wav
+scratch_validation_report.json
+dataset_validacion
+validation_report.json
