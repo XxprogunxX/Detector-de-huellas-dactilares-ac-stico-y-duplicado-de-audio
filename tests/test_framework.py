@@ -65,7 +65,7 @@ class TestValidationFramework(unittest.TestCase):
             {"track_a_path": "SongA.wav", "track_b_path": "SongA_Copy.wav", "expected_category": "EXACT_HASH"},
             {"track_a_path": "SongA.wav", "track_b_path": "SongA_Meta.wav", "expected_category": "EXACT_AUDIO"},
             {"track_a_path": "SongA.wav", "track_b_path": "SongA.mp3", "expected_category": "ACOUSTIC_DUPLICATE"},
-            {"track_a_path": "SongA.wav", "track_b_path": "SongB.wav", "expected_category": "NO_MATCH"},
+            {"track_a_path": "SongA.wav", "track_b_path": "SongB.wav", "expected_category": "LOW_CONFIDENCE_REVIEW"},
             {"track_a_path": "SongA.wav", "track_b_path": "SongA_Short.wav", "expected_category": "POSSIBLE_DUPLICATE"},
             # Error case (file doesn't exist)
             {"track_a_path": "SongA.wav", "track_b_path": "Missing.wav", "expected_category": "NO_MATCH"},
@@ -112,7 +112,7 @@ class TestValidationFramework(unittest.TestCase):
         self.assertEqual(matrix["EXACT_HASH"]["EXACT_HASH"], 1)
         self.assertEqual(matrix["EXACT_AUDIO"]["EXACT_AUDIO"], 1)
         self.assertEqual(matrix["ACOUSTIC_DUPLICATE"]["ACOUSTIC_DUPLICATE"], 1)
-        self.assertEqual(matrix["NO_MATCH"]["NO_MATCH"], 1)
+        self.assertEqual(matrix["LOW_CONFIDENCE_REVIEW"]["LOW_CONFIDENCE_REVIEW"], 1)
         self.assertEqual(matrix["POSSIBLE_DUPLICATE"]["POSSIBLE_DUPLICATE"], 1)
         
         # Verify misclassifications is empty

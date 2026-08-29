@@ -38,8 +38,12 @@ Una aplicación de escritorio moderna, robusta y de alto rendimiento en Python d
   - Detecta la misma pista/grabación original sin importar el formato (`MP3`, `FLAC`, `WAV`, `M4A`, `OGG`, `AAC`), la tasa de bits (320 kbps vs 128 kbps), normalizaciones de volumen o compresión.
 - **Posibles Duplicados / Versiones ($80\% - 94.9\%$)**:
   - Identifica remasterizaciones, radio edits, versiones extendidas o directos que comparten la misma estructura armónica.
-- **Cero Falsos Positivos**:
+- **Revisión Manual de Baja Confianza ($40\% - 79.9\%$)**:
+  - Aísla intencionalmente modificaciones extremas (ej. alteraciones severas de tempo, inversión de fase, EQ profunda).
+  - Los grupos en esta franja nacen **siempre** protegidos contra auto-eliminación, forzando la intervención humana.
+- **Cero Falsos Positivos y Aislamiento Seguro**:
   - Agrupamiento matemático riguroso mediante conjuntos disjuntos (*Disjoint-Set Union / Union-Find*). Canciones distintas del mismo artista jamás se agrupan juntas.
+  - Protección a nivel de modelo mediante el flag `requires_manual_review` que desactiva cualquier regla de limpieza automática masiva.
 
 ### 2. 🔬 Auditoría Espectral y Detección de Falsos Lossless (*Fake FLAC*)
 - **Análisis FFT de Corte Espectral (*Spectral Rolloff*)**:

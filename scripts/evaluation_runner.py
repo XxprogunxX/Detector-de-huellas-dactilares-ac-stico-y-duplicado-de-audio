@@ -112,6 +112,7 @@ def run_evaluation(manifest_path: str, dataset_dir: str, output_json: str, limit
         for expected in categories
     }
     
+    all_scores = []
     misclassifications = []
     errors = []
 
@@ -189,6 +190,14 @@ def run_evaluation(manifest_path: str, dataset_dir: str, output_json: str, limit
             confusion_matrix[expected_category][predicted_category] += 1
             summary["evaluated_cases"] += 1
             
+            all_scores.append({
+                "track_a": track_a_rel,
+                "track_b": track_b_rel,
+                "expected": expected_category,
+                "predicted": predicted_category,
+                "confidence": report.confidence
+            })
+
             if expected_category == predicted_category:
                 summary["exact_matches"] += 1
             else:
@@ -225,7 +234,16 @@ def run_evaluation(manifest_path: str, dataset_dir: str, output_json: str, limit
     with open(output_json, 'w', encoding='utf-8') as f:
         json.dump(final_report, f, indent=4, ensure_ascii=False)
         
+    # Guardar CSV crudo para análisis empírico
+    csv_path = output_json.replace(".json", "_scores.csv")
+    with open(csv_path, 'w', encoding='utf-8', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(["track_a", "track_b", "expected", "predicted", "confidence"])
+        for m in all_scores:
+            writer.writerow([m["track_a"], m["track_b"], m["expected"], m["predicted"], f"{m['confidence']:.2f}"])
+
     print(f"\nEvaluation complete. Report saved to {output_json}")
+    print(f"Scores salvados en: {csv_path}")
     print(f"Accuracy: {summary['accuracy'] * 100:.2f}% ({summary['exact_matches']}/{summary['evaluated_cases']})")
     if summary["error_cases"] > 0:
         print(f"Warning: {summary['error_cases']} cases failed to evaluate.")

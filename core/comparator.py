@@ -15,7 +15,7 @@ def popcount32(x: int) -> int:
 def compare_raw_fingerprints(
     fp_a: List[int],
     fp_b: List[int],
-    max_offset_frames: int = 15,
+    max_offset_frames: int = 600,
     min_overlap_frames: int = 40
 ) -> Tuple[float, int]:
     """
@@ -204,6 +204,9 @@ def compare_tracks(track_a: AudioTrack, track_b: AudioTrack) -> EvidenceReport:
             report.reasons.append(f"Posible Duplicado ({final_confidence:.1f}%): Variación de duración (posible versión extendida/directo).")
         else:
             report.reasons.append(f"Posible Duplicado ({final_confidence:.1f}%): Variación acústica (posible remasterización o transcodificación).")
+    elif final_confidence >= 40.0:
+        report.classification = DuplicateType.LOW_CONFIDENCE_REVIEW
+        report.reasons.append(f"Revisión requerida ({final_confidence:.1f}%): Coincidencia parcial o posible error de detección.")
     else:
         report.classification = DuplicateType.NO_MATCH
         report.reasons.append(f"Pistas diferentes ({final_confidence:.1f}%).")

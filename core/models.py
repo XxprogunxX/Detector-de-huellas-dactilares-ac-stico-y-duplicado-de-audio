@@ -13,6 +13,7 @@ class DuplicateType(str, Enum):
     EXACT_AUDIO = "EXACT_AUDIO"              # 100% Identical decoded PCM audio stream
     ACOUSTIC_DUPLICATE = "ACOUSTIC_DUPLICATE"# >= 95% Acoustic similarity (same recording)
     POSSIBLE_DUPLICATE = "POSSIBLE_DUPLICATE"# 80% - 94.9% or duration variance (remaster, edit, live)
+    LOW_CONFIDENCE_REVIEW = "LOW_CONFIDENCE_REVIEW"  # 40% - 79.9% Requires Human Review
     NO_MATCH = "NO_MATCH"                    # Distinct audio
     UNCERTAIN = "UNCERTAIN"                  # Missing signals, could not compare
 
@@ -163,6 +164,7 @@ class DuplicateGroup:
     best_track_reason: str = ""
     average_similarity: float = 100.0
     space_saving_bytes: int = 0
+    requires_manual_review: bool = False
 
     def recalculate_space_saving(self) -> int:
         if len(self.tracks) <= 1:

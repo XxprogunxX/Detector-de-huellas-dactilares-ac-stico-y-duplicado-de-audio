@@ -106,7 +106,10 @@ def run_cli_mode(args):
 
         for track in group.tracks:
             is_best = (track.filepath == group.best_track_path)
-            action_tag = "[green]CONSERVAR[/]" if is_best else "[red]ELIMINAR[/]"
+            if getattr(group, "requires_manual_review", False):
+                action_tag = "[yellow]REVISAR[/]"
+            else:
+                action_tag = "[green]CONSERVAR[/]" if is_best else "[red]ELIMINAR[/]"
             table.add_row(
                 action_tag,
                 track.filename,
@@ -127,7 +130,10 @@ def run_cli_mode(args):
             for group in groups:
                 for track in group.tracks:
                     is_best = (track.filepath == group.best_track_path)
-                    action = "CONSERVAR" if is_best else "ELIMINAR"
+                    if getattr(group, "requires_manual_review", False):
+                        action = "REVISAR"
+                    else:
+                        action = "CONSERVAR" if is_best else "ELIMINAR"
                     writer.writerow([
                         group.group_id, group.primary_type.value, action, track.filepath,
                         track.format, track.bitrate, track.duration, track.filesize,

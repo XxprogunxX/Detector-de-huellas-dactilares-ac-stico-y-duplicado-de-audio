@@ -130,17 +130,21 @@ Acción Segura del Usuario (Mover a Respaldo / Eliminar con Confirmación)
 
 1. **Duplicado Exacto (100%)**:
    - `EXACT_HASH`: Mismo SHA-256 bit-a-bit en disco.
-   - `EXACT_AUDIO`: Mismo hash de flujo PCM decodificado (mismo audio, diferentes tags ID3 o contenedor).
+   - `EXACT_AUDIO`: Mismo hash de flujo PCM decodificado (mismo audio, diferentes tags ID3 o contenedor). Cortocircuito exacto, sin rango porcentual.
 2. **Duplicado Acústico ($\ge 95\%$)**:
    - Misma grabación original analizada mediante huellas Chromaprint locales.
    - Tolera variaciones de formato, bitrate (320k vs 128k), compresión y ganancia de volumen.
 3. **Posible Duplicado / Versión ($80\% - 94.9\%$)**:
    - Remasters, radio edits, versiones extendidas, pistas en vivo.
    - Se muestran como candidatos para revisión del usuario, nunca como equivalencias exactas.
+4. **Revisión Manual de Baja Confianza ($40\% - 79.9\%$)**:
+   - Atrapa intencionalmente modificaciones severas (Tempo alterado, EQ extremo, aislamientos vocales simples) que destruyen parcialmente la huella acústica.
+   - Estos grupos **siempre** nacen en estado `UNSET` para forzar revisión humana.
 
-### Regla Crítica: Cero Falsos Positivos
+### Regla Crítica: Cero Falsos Positivos y Aislamiento Seguro
 - **La precisión es sagrada:** Jamás agrupar canciones distintas simplemente porque son del mismo artista, álbum, año, duración similar o género.
 - El agrupamiento de Union-Find (`core/clustering.py`) debe mantener componentes conexas estrictas y validar que cada unión cumpla con los umbrales acústicos establecidos.
+- Todo grupo que requiera revisión (`LOW_CONFIDENCE_REVIEW`, `POSSIBLE_DUPLICATE`) debe inicializarse con el flag de modelo `requires_manual_review = True` para desactivar permanentemente las políticas masivas de limpieza sobre ellos.
 
 ---
 
@@ -153,7 +157,8 @@ Acción Segura del Usuario (Mover a Respaldo / Eliminar con Confirmación)
 
 ### `core/comparator.py`
 - Cálculo ultra-optimizado de distancia de Hamming entre sub-huellas acústicas mediante operaciones a nivel de bit (`popcount` / bitwise).
-- Alineamiento temporal con ventana deslizante (*sliding window*) para detectar audios desfasados o con silencios introductorios.
+- Alineamiento temporal con ventana deslizante (*sliding window*) de **600 frames** de tolerancia (`max_offset_frames=600`) para detectar audios desfasados o con silencios introductorios severos sin comprometer artificialmente el score de similitud.
+- Implementa un cortafuegos temprano por duración: diferencias >90 segundos devuelven 0% de similitud instantánea para salvaguardar ciclos de CPU.
 
 ### `core/quality_analyzer.py`
 - Análisis FFT eficiente calculando el *spectral rolloff* en el percentil 99% de energía.
@@ -165,6 +170,7 @@ Acción Segura del Usuario (Mover a Respaldo / Eliminar con Confirmación)
 - Soporte para migraciones seguras y métodos de optimización (`VACUUM`, `clear_cache`).
 
 ### `core/file_manager.py` (Zona de Máximo Riesgo ⚠️)
+- **Aislamiento por `requires_manual_review`:** Todo agrupamiento automático (`auto_apply_recommendations`) DEBE verificar el estado de este flag en el modelo y ejecutar un `continue` preventivo si es True.
 - **Nunca eliminar archivos sin confirmación explícita.**
 - **Prohibido borrar pistas marcadas como `CONSERVAR` / `KEEP`.**
 - **Impedir eliminar todas las copias de un grupo:** siempre debe preservarse al menos una copia intacta.

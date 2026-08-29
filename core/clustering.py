@@ -277,10 +277,13 @@ def cluster_duplicates(
         if best_track.fake_lossless_confidence > 50.0:
             best_reason = f"⚠️ Nota: Transcodificación probable ({best_track.fake_lossless_confidence:.0f}%). Se seleccionó la mejor fuente disponible."
 
+        # Determine if this group requires manual review
+        req_review = primary_type in (DuplicateType.POSSIBLE_DUPLICATE, DuplicateType.LOW_CONFIDENCE_REVIEW) if hasattr(DuplicateType, "LOW_CONFIDENCE_REVIEW") else (primary_type == DuplicateType.POSSIBLE_DUPLICATE)
+
         # Mark default actions: keep best, mark others as delete (or unset for review)
         for t in group_tracks:
-            if primary_type == DuplicateType.POSSIBLE_DUPLICATE:
-                t.action = FileAction.UNSET if t.filepath != best_track.filepath else FileAction.KEEP
+            if req_review:
+                t.action = FileAction.UNSET
             else:
                 if t.filepath == best_track.filepath:
                     t.action = FileAction.KEEP
@@ -293,7 +296,8 @@ def cluster_duplicates(
             tracks=group_tracks,
             best_track_path=best_track.filepath,
             best_track_reason=best_reason,
-            average_similarity=round(avg_sim, 1)
+            average_similarity=round(avg_sim, 1),
+            requires_manual_review=req_review
         )
         dup_group.recalculate_space_saving()
         duplicate_groups.append(dup_group)

@@ -38,5 +38,20 @@ class TestClustering(unittest.TestCase):
         self.assertEqual(len(groups), 0)
 
 
+    def test_low_confidence_review_default_action(self):
+        # Fingerprints just similar enough to trigger LOW_CONFIDENCE_REVIEW (40-79.9%)
+        fp1 = [0xABCDABCD] * 50 + [0x12345678] * 450
+        fp2 = [0xABCDABCD] * 50 + [0x00000000] * 450
+        t1 = AudioTrack(filepath="path/song1.mp3", duration=200.0, fingerprint_raw=fp1)
+        t2 = AudioTrack(filepath="path/song2.mp3", duration=200.0, fingerprint_raw=fp2)
+
+        groups = cluster_duplicates([t1, t2])
+        if len(groups) == 1:
+            group = groups[0]
+            if group.primary_type == DuplicateType.LOW_CONFIDENCE_REVIEW:
+                self.assertTrue(group.requires_manual_review)
+                for t in group.tracks:
+                    self.assertEqual(t.action, FileAction.UNSET)
+
 if __name__ == "__main__":
     unittest.main()

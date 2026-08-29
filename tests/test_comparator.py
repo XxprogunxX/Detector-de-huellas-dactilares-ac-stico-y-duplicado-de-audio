@@ -26,6 +26,19 @@ class TestComparator(unittest.TestCase):
         fp_b = [0x55555555] * 40  # 100% bit inverted
         sim, _ = compare_raw_fingerprints(fp_a, fp_b)
         self.assertLess(sim, 0.20)
+        
+    def test_large_offset_alignment(self):
+        # Base fingerprint of 1000 frames
+        base_fp = [0x12345678, 0xABCDEF01, 0x13579BDF, 0x2468ACE0] * 250  # 1000 frames total
+        # Shifted fingerprint by 250 frames (approx 35 seconds)
+        shifted_fp = base_fp[250:] + [0x00000000] * 250
+        
+        sim, offset = compare_raw_fingerprints(base_fp, shifted_fp)
+        
+        self.assertAlmostEqual(sim, 1.0, places=2)
+        # B is shifted forward relative to A, so B starts at offset 250 of A. 
+        # According to the sliding window, if B is a suffix of A (started later), offset is positive
+        self.assertIn(offset, [250, -250])
 
     def test_exact_hash_match(self):
         t1 = AudioTrack(filepath="t1.mp3", sha256="abc123hash", duration=180.0)
