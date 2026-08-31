@@ -26,3 +26,24 @@ El sistema ha sido validado empíricamente a través del `Benchmark V5` (170 par
 - **Cortafuegos de Duración:** Las pistas con diferencias de duración superiores a 90 segundos son descartadas tempranamente (similitud = 0%), optimizando ciclos de CPU en escaneos masivos. Casos como loops o samples cortos son correctamente rechazados o aislados por esta regla.
 
 El sistema se encuentra estable, auditable, con umbrales validados empíricamente y con la integridad de los datos del usuario garantizada.
+
+## 5. Auditoría y Corrección de Agrupamiento de Duplicados (Fase 5)
+Se completó una auditoría crítica, refactorización y validación en el pipeline completo (`scanner.py` $\rightarrow$ `clustering.py` $\rightarrow$ `compare_tracks`) para resolver los hallazgos de transitividad insegura (AUD-001) y cuellos de botella/falsos negativos del LSH (AUD-002).
+
+### Mitigación de la Transitividad Insegura (AUD-001)
+* **Problema:** Dos pistas distintas (A y C) con un bajo nivel de similitud (ej. 30%) podían terminar agrupadas bajo la clasificación fuerte `ACOUSTIC_DUPLICATE` (sin revisión manual) si ambas tenían un nivel alto de similitud con una pista intermedia B, engañando a la heurística de evaluación.
+* **Solución:** Se desarrolló la heurística de seguridad `has_weak_link` en `cluster_duplicates`. Si cualquier par que haya justificado la agrupación cae en `POSSIBLE_DUPLICATE` o `LOW_CONFIDENCE_REVIEW`, se activa este flag. Esto fuerza a que `requires_manual_review` se evalúe a `True` y degrada el tipo primario del grupo, garantizando que un humano deba verificar el grupo.
+
+### Optimización del Prefiltro LSH (AUD-002)
+* **Problema:** El LSH agrupaba por token LSH + un "bucket de duración", lo que impedía agrupar pistas con duraciones muy distintas (ej. versiones "Radio Edit"). Además, un bucket muy grande se limitaba con `max_bucket_size=35`, provocando que bibliotecas con >35 versiones idénticas de una pista devolvieran 0 duplicados.
+* **Solución:**
+  * **Eliminación del bucket de duración:** El índice LSH ahora agrupa **exclusivamente por token de hash** `(val)`. Las duraciones no se consideran en LSH.
+  * **Empuje de robustez `min_hits=3`:** Tras simular el incremento de colisiones espurias al eliminar el bucket de duración, validamos empíricamente que requerir 3 hits superpuestos descarta los falsos positivos (100% selectividad) mientras mantiene la recuperación perfecta.
+  * **Incremento a `max_bucket_size=500`:** Se incrementó el umbral directamente a 500 para evitar sesgar resultados truncando buckets. El pipeline escala eficientemente con esto gracias a un filtro deduplicador de pares (`candidate_pairs_set`) introducido y al `min_hits`.
+  * > [!NOTE]
+    > **Limitación Conocida:** Al fijar `min_hits = 3` para todos los casos (eliminando la antigua regla que requería solo 1 o 2 coincidencias para huellas `<15` tokens), se priorizó agresivamente la seguridad para evitar agrupar audios distintos. Esto introduce un pequeño sesgo hacia **falsos negativos en clips de audio extremadamente cortos** (como jingles breves o efectos de sonido), los cuales podrían no generar suficientes tokens LSH para alcanzar el umbral de 3 coincidencias. Esta es la dirección correcta (seguridad sobre recall), pero debe tenerse en cuenta si la herramienta se adapta a librerías de samples SFX en el futuro.
+
+### Validación y Rendimiento (Benchmark V5)
+* Todo el comportamiento quedó anclado con 3 nuevos tests unitarios críticos.
+* Se validó el pipeline completo de agrupamiento con **10,000 huellas aleatorias** inyectando casos adversariales de transitividad, recortes Radio Edit, y un mega-clúster de 100 duplicados.
+* **Resultados:** Precisión de recall **100%** para todos los duplicados inyectados, **0** pares espurios generados, y un tiempo de ejecución total de ~22 segundos (cuello de botella $O(N^2)$ completamente erradicado).

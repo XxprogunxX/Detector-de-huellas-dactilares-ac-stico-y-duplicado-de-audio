@@ -22,8 +22,9 @@ def generate_synthetic_audio(duration: float = 35.0, sample_rate: int = 44100, m
     """Generates synthetic multi-tone full-spectrum waveform for testing."""
     t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
     if melody_type == 1:
-        # Song A: A-minor chord arpeggio
-        sig = 0.4 * np.sin(2 * np.pi * 440 * t) + 0.3 * np.sin(2 * np.pi * 554 * t) + 0.2 * np.sin(2 * np.pi * 659 * t)
+        # Song A: A-minor chord arpeggio with frequency sweep to generate > 3 unique tokens
+        f_sweep = 440 + 10 * t
+        sig = 0.4 * np.sin(2 * np.pi * f_sweep * t) + 0.3 * np.sin(2 * np.pi * 554 * t) + 0.2 * np.sin(2 * np.pi * 659 * t)
         sig += 0.05 * np.sin(2 * np.pi * 3000 * t) # Midband anchor for spectral analysis
         # Full-spectrum broadband noise ensures the genuine file registers a 22kHz cutoff
         sig += 0.05 * np.random.randn(len(t))

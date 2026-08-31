@@ -120,30 +120,27 @@ def cluster_duplicates(
         fp = t.fingerprint_raw
         if not fp:
             continue
-        dur_bucket = int(t.duration // 5)
         limit = min(300, len(fp))
         seen = set()
         for i in range(limit):
             val = fp[i]
             if val != 0:
-                s = (dur_bucket, val)
-                if s not in seen:
-                    seen.add(s)
-                    shingle_index[s].append(idx)
+                if val not in seen:
+                    seen.add(val)
+                    shingle_index[val].append(idx)
                 # 28-bit prefix for MP3 compression tolerance
                 prefix_val = val & 0xFFFFFFF0
                 if prefix_val != val:
-                    sp = (dur_bucket, prefix_val)
-                    if sp not in seen:
-                        seen.add(sp)
-                        shingle_index[sp].append(idx)
+                    if prefix_val not in seen:
+                        seen.add(prefix_val)
+                        shingle_index[prefix_val].append(idx)
 
     if progress_callback:
         progress_callback(0.0, 0, 0, "Filtrando coincidencias acústicas...")
 
     # Accumulate co-occurring token counts between candidate track pairs
     pair_hits = defaultdict(int)
-    max_bucket_size = 35
+    max_bucket_size = 500
 
     for s, group in shingle_index.items():
         unique_group = list(set(group))
@@ -167,8 +164,8 @@ def cluster_duplicates(
     for (idx_a, idx_b), hits in pair_hits.items():
         t_a = tracks[idx_a]
         t_b = tracks[idx_b]
-        min_hits = 1 if min(len(t_a.fingerprint_raw), len(t_b.fingerprint_raw)) < 15 else 2
-        if hits >= min_hits and abs(t_a.duration - t_b.duration) <= 8.0:
+        min_hits = 3
+        if hits >= min_hits:
             if ds.find(t_a.filepath) != ds.find(t_b.filepath):
                 p1, p2 = (t_a.filepath, t_b.filepath) if t_a.filepath < t_b.filepath else (t_b.filepath, t_a.filepath)
                 candidate_pairs_set.add((p1, p2))
@@ -263,6 +260,12 @@ def cluster_duplicates(
         
         avg_sim = (total_sim / pair_count) * 100.0 if pair_count > 0 else 100.0
 
+        has_weak_link = False
+        if DuplicateType.POSSIBLE_DUPLICATE in types_in_group:
+            has_weak_link = True
+        if hasattr(DuplicateType, "LOW_CONFIDENCE_REVIEW") and DuplicateType.LOW_CONFIDENCE_REVIEW in types_in_group:
+            has_weak_link = True
+
         if DuplicateType.EXACT_HASH in types_in_group and len(types_in_group) == 1:
             primary_type = DuplicateType.EXACT_HASH
         elif DuplicateType.EXACT_AUDIO in types_in_group and len(types_in_group) <= 2:
@@ -270,6 +273,9 @@ def cluster_duplicates(
         elif DuplicateType.ACOUSTIC_DUPLICATE in types_in_group:
             primary_type = DuplicateType.ACOUSTIC_DUPLICATE
         else:
+            primary_type = DuplicateType.POSSIBLE_DUPLICATE
+
+        if has_weak_link:
             primary_type = DuplicateType.POSSIBLE_DUPLICATE
 
         # Formulate human explanation for best track recommendation
