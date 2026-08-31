@@ -38,6 +38,9 @@ def set_track_action_in_group(group: DuplicateGroup, filepath: str, action: File
 def auto_apply_recommendations(groups: List[DuplicateGroup]):
     """Sets recommended best track to KEEP and all others to DELETE across all groups."""
     for group in groups:
+        if getattr(group, "requires_manual_review", False):
+            continue
+
         for t in group.tracks:
             if t.filepath == group.best_track_path:
                 t.action = FileAction.KEEP

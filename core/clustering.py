@@ -6,16 +6,17 @@ from typing import List, Dict, Set, Tuple, Optional
 from collections import defaultdict
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import itertools
 
-from core.models import AudioTrack, DuplicateGroup, DuplicateType, FileAction, ComparisonResult
+from core.models import AudioTrack, DuplicateGroup, DuplicateType, FileAction, EvidenceReport
 from core.comparator import compare_tracks
 
 
-def _compare_chunk_worker(pairs: List[Tuple[AudioTrack, AudioTrack]]) -> List[ComparisonResult]:
+def _compare_chunk_worker(pairs: List[Tuple[AudioTrack, AudioTrack]]) -> List[EvidenceReport]:
     results = []
     for t_a, t_b in pairs:
         res = compare_tracks(t_a, t_b)
-        if res.duplicate_type != DuplicateType.NO_MATCH:
+        if res.classification != DuplicateType.NO_MATCH:
             results.append(res)
     return results
 
@@ -66,7 +67,7 @@ def cluster_duplicates(
 
     track_map: Dict[str, AudioTrack] = {t.filepath: t for t in tracks}
     ds = DisjointSet()
-    pair_results: Dict[Tuple[str, str], ComparisonResult] = {}
+    pair_results: Dict[Tuple[str, str], EvidenceReport] = {}
 
     # Step 1: Instant Exact Hash Clustering (O(N))
     # Step 1: Exact Matches (SHA256 and PCM Hash)
@@ -80,14 +81,14 @@ def cluster_duplicates(
             for i in range(len(group)):
                 for j in range(i + 1, len(group)):
                     ds.union(group[i].filepath, group[j].filepath)
-                    # We can directly create a ComparisonResult for exact matches
-                    pair_results[(group[i].filepath, group[j].filepath)] = ComparisonResult(
+                    # We can directly create an EvidenceReport for exact matches
+                    pair_results[(group[i].filepath, group[j].filepath)] = EvidenceReport(
                         track_a_path=group[i].filepath,
                         track_b_path=group[j].filepath,
-                        similarity=1.0,
-                        duplicate_type=DuplicateType.EXACT_HASH,
-                        duration_diff=0.0,
-                        reason="Duplicado Exacto: El archivo es idéntico bit a bit (SHA-256)."
+                        classification=DuplicateType.EXACT_HASH,
+                        confidence=100.0,
+                        is_exact_hash=True,
+                        reasons=["Duplicado Exacto: Archivos idénticos byte por byte (mismo hash SHA-256)."]
                     )
 
     hash_groups = defaultdict(list)
@@ -101,13 +102,13 @@ def cluster_duplicates(
             for other in group[1:]:
                 ds.union(first, other.filepath)
                 if (first, other.filepath) not in pair_results:
-                    pair_results[(first, other.filepath)] = ComparisonResult(
+                    pair_results[(first, other.filepath)] = EvidenceReport(
                         track_a_path=first,
                         track_b_path=other.filepath,
-                        similarity=1.0,
-                        duplicate_type=DuplicateType.EXACT_AUDIO,
-                        duration_diff=abs(group[0].duration - other.duration),
-                        reason="Duplicado de Audio Exacto: Misma señal PCM decodificada."
+                        classification=DuplicateType.EXACT_AUDIO,
+                        confidence=100.0,
+                        is_exact_audio=True,
+                        reasons=["Duplicado de Audio Exacto: Misma señal PCM decodificada (diferente contenedor o etiquetas ID3)."]
                     )
 
     # Step 2: High-Precision Subfingerprint Index with Duration Bucketing
@@ -119,30 +120,27 @@ def cluster_duplicates(
         fp = t.fingerprint_raw
         if not fp:
             continue
-        dur_bucket = int(t.duration // 5)
         limit = min(300, len(fp))
         seen = set()
         for i in range(limit):
             val = fp[i]
             if val != 0:
-                s = (dur_bucket, val)
-                if s not in seen:
-                    seen.add(s)
-                    shingle_index[s].append(idx)
+                if val not in seen:
+                    seen.add(val)
+                    shingle_index[val].append(idx)
                 # 28-bit prefix for MP3 compression tolerance
                 prefix_val = val & 0xFFFFFFF0
                 if prefix_val != val:
-                    sp = (dur_bucket, prefix_val)
-                    if sp not in seen:
-                        seen.add(sp)
-                        shingle_index[sp].append(idx)
+                    if prefix_val not in seen:
+                        seen.add(prefix_val)
+                        shingle_index[prefix_val].append(idx)
 
     if progress_callback:
         progress_callback(0.0, 0, 0, "Filtrando coincidencias acústicas...")
 
     # Accumulate co-occurring token counts between candidate track pairs
     pair_hits = defaultdict(int)
-    max_bucket_size = 35
+    max_bucket_size = 500
 
     for s, group in shingle_index.items():
         unique_group = list(set(group))
@@ -166,8 +164,8 @@ def cluster_duplicates(
     for (idx_a, idx_b), hits in pair_hits.items():
         t_a = tracks[idx_a]
         t_b = tracks[idx_b]
-        min_hits = 1 if min(len(t_a.fingerprint_raw), len(t_b.fingerprint_raw)) < 15 else 2
-        if hits >= min_hits and abs(t_a.duration - t_b.duration) <= 8.0:
+        min_hits = 3
+        if hits >= min_hits:
             if ds.find(t_a.filepath) != ds.find(t_b.filepath):
                 p1, p2 = (t_a.filepath, t_b.filepath) if t_a.filepath < t_b.filepath else (t_b.filepath, t_a.filepath)
                 candidate_pairs_set.add((p1, p2))
@@ -247,7 +245,8 @@ def cluster_duplicates(
 
         # Determine primary duplicate type and average similarity
         types_in_group = set()
-        sim_scores = []
+        total_sim = 0.0
+        pair_count = 0
 
         for i in range(len(group_tracks)):
             for j in range(i + 1, len(group_tracks)):
@@ -255,10 +254,17 @@ def cluster_duplicates(
                 p2 = group_tracks[j].filepath
                 res = pair_results.get((p1, p2)) or pair_results.get((p2, p1))
                 if res:
-                    types_in_group.add(res.duplicate_type)
-                    sim_scores.append(res.similarity)
+                    types_in_group.add(res.classification)
+                    total_sim += res.confidence / 100.0
+                    pair_count += 1
+        
+        avg_sim = (total_sim / pair_count) * 100.0 if pair_count > 0 else 100.0
 
-        avg_sim = (sum(sim_scores) / len(sim_scores) * 100.0) if sim_scores else 100.0
+        has_weak_link = False
+        if DuplicateType.POSSIBLE_DUPLICATE in types_in_group:
+            has_weak_link = True
+        if hasattr(DuplicateType, "LOW_CONFIDENCE_REVIEW") and DuplicateType.LOW_CONFIDENCE_REVIEW in types_in_group:
+            has_weak_link = True
 
         if DuplicateType.EXACT_HASH in types_in_group and len(types_in_group) == 1:
             primary_type = DuplicateType.EXACT_HASH
@@ -269,15 +275,21 @@ def cluster_duplicates(
         else:
             primary_type = DuplicateType.POSSIBLE_DUPLICATE
 
+        if has_weak_link:
+            primary_type = DuplicateType.POSSIBLE_DUPLICATE
+
         # Formulate human explanation for best track recommendation
         best_reason = f"Mayor fidelidad: {best_track.quality_details} (Puntuación: {best_track.quality_score}/100)"
         if best_track.fake_lossless_confidence > 50.0:
             best_reason = f"⚠️ Nota: Transcodificación probable ({best_track.fake_lossless_confidence:.0f}%). Se seleccionó la mejor fuente disponible."
 
+        # Determine if this group requires manual review
+        req_review = primary_type in (DuplicateType.POSSIBLE_DUPLICATE, DuplicateType.LOW_CONFIDENCE_REVIEW) if hasattr(DuplicateType, "LOW_CONFIDENCE_REVIEW") else (primary_type == DuplicateType.POSSIBLE_DUPLICATE)
+
         # Mark default actions: keep best, mark others as delete (or unset for review)
         for t in group_tracks:
-            if primary_type == DuplicateType.POSSIBLE_DUPLICATE:
-                t.action = FileAction.UNSET if t.filepath != best_track.filepath else FileAction.KEEP
+            if req_review:
+                t.action = FileAction.UNSET
             else:
                 if t.filepath == best_track.filepath:
                     t.action = FileAction.KEEP
@@ -290,7 +302,8 @@ def cluster_duplicates(
             tracks=group_tracks,
             best_track_path=best_track.filepath,
             best_track_reason=best_reason,
-            average_similarity=round(avg_sim, 1)
+            average_similarity=round(avg_sim, 1),
+            requires_manual_review=req_review
         )
         dup_group.recalculate_space_saving()
         duplicate_groups.append(dup_group)
