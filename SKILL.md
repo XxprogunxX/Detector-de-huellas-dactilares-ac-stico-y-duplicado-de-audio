@@ -28,12 +28,12 @@ El sistema está modularizado con estricta separación de responsabilidades:
 ```text
 main.py
 ├── core/
-│   ├── models.py               # Modelos de datos (AudioTrack, DuplicateGroup, ScanStats, Enums)
+│   ├── models.py               # Modelos de datos (AudioTrack, DuplicateGroup, EvidenceReport, ScanStats)
 │   ├── fingerprint.py          # Hashes SHA-256/PCM, huellas Chromaprint y serialización
 │   ├── metadata_extractor.py   # Extracción de metadatos con Mutagen
 │   ├── quality_analyzer.py     # Análisis espectral FFT, corte de frecuencia y scoring
-│   ├── comparator.py           # Alineamiento temporal y cálculo de distancia de Hamming
-│   ├── clustering.py           # Agrupamiento disjunto (Union-Find) y ranking
+│   ├── comparator.py           # Alineamiento temporal, ventana de offset (600 frames) y Hamming
+│   ├── clustering.py           # Prefiltro LSH, Union-Find, mitigación has_weak_link y ranking
 │   ├── database.py             # Motor de persistencia SQLite WAL de alta velocidad
 │   ├── scanner.py              # Orquestador recursivo de escaneo multiproceso y por fases
 │   └── file_manager.py         # Operaciones seguras en disco (mover, marcar, eliminar)
@@ -54,11 +54,16 @@ main.py
 │       ├── settings_view.py    # Vista de configuración de motor y mantenimiento BD
 │       ├── sidebar.py          # Barra lateral de navegación con iconos QtAwesome
 │       └── stats_bar.py        # Barra superior con estadísticas globales
+├── scripts/
+│   ├── generate_dataset.py     # Generador de dataset sintético y adversarial de audio
+│   └── evaluation_runner.py    # Ejecutor de benchmarks automatizados y métricas
 └── tests/
-    ├── test_clustering.py      # Pruebas de agrupamiento Union-Find
-    ├── test_comparator.py      # Pruebas de comparación acústica y Hamming
+    ├── test_clustering.py      # Pruebas de agrupamiento Union-Find, transitividad y LSH
+    ├── test_comparator.py      # Pruebas de comparación acústica, Hamming y offset
     ├── test_database.py        # Pruebas de base de datos SQLite y caché
     ├── test_end_to_end.py      # Suite integral end-to-end con síntesis de audio
+    ├── test_file_manager.py    # Pruebas de seguridad de operaciones en disco y permisos
+    ├── test_framework.py       # Pruebas del framework de evaluación adversarial
     ├── test_performance.py     # Pruebas de rendimiento y estrés
     └── test_quality.py         # Pruebas de detección de falsos lossless y FFT
 ```
@@ -159,6 +164,11 @@ Acción Segura del Usuario (Mover a Respaldo / Eliminar con Confirmación)
 - Cálculo ultra-optimizado de distancia de Hamming entre sub-huellas acústicas mediante operaciones a nivel de bit (`popcount` / bitwise).
 - Alineamiento temporal con ventana deslizante (*sliding window*) de **600 frames** de tolerancia (`max_offset_frames=600`) para detectar audios desfasados o con silencios introductorios severos sin comprometer artificialmente el score de similitud.
 - Implementa un cortafuegos temprano por duración: diferencias >90 segundos devuelven 0% de similitud instantánea para salvaguardar ciclos de CPU.
+
+### `core/clustering.py`
+- **Prefiltro LSH de alto rendimiento:** Genera buckets exclusivamente por token de hash (`val`), sin restringir por buckets rígidos de duración para capturar correctamente recortes y ediciones como *Radio Edits*.
+- **Umbral estricto `min_hits = 3` y escalabilidad:** Requiere al menos 3 coincidencias de tokens entre pares para suprimir falsos positivos. Soporta mega-clústeres mediante `max_bucket_size = 500` con deduplicación de pares candidatos (`candidate_pairs_set`) para evitar cuellos de botella $O(N^2)$.
+- **Mitigación de Transitividad Insegura (`has_weak_link`):** Si cualquier par conexo dentro de un componente conexo cae en `POSSIBLE_DUPLICATE` o `LOW_CONFIDENCE_REVIEW`, el grupo completo activa `requires_manual_review = True`, degrada su clasificación y blinda a todas las pistas integrantes contra borrados automáticos.
 
 ### `core/quality_analyzer.py`
 - Análisis FFT eficiente calculando el *spectral rolloff* en el percentil 99% de energía.
