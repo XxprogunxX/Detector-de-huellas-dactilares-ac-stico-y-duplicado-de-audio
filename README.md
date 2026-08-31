@@ -29,21 +29,23 @@ Una aplicación de escritorio moderna, robusta y de alto rendimiento en Python d
 
 ## 🌟 Características Principales
 
-### 1. 🔍 Detección de Duplicados en 3 Niveles Jerárquicos
+### 1. 🔍 Detección de Duplicados en 4 Niveles Jerárquicos
 - **Duplicados Exactos (100%)**:
-  - *Bit-a-bit en disco (SHA-256)*: Detección instantánea de copias idénticas.
-  - *Flujo de audio PCM decodificado*: Identifica canciones idénticas con diferentes etiquetas ID3, metadatos o contenedores (`.mp3` vs `.wav` con audio idéntico).
-- **Duplicados Acústicos ($\ge 95\%$)**:
-  - Huellas acústicas Chromaprint (`fpcalc`) con comparación de distancia de Hamming bitwise y alineamiento temporal dinámico.
+  - *Bit-a-bit en disco (`EXACT_HASH`)*: Coincidencia instantánea SHA-256 de archivos idénticos en disco.
+  - *Flujo de audio PCM decodificado (`EXACT_AUDIO`)*: Hash de audio PCM decodificado crudo, detectando pistas idénticas con distintos contenedores (`.flac` vs `.wav` vs `.mp3`) o metadatos ID3 alterados sin depender de heurísticas.
+- **Duplicados Acústicos ($\ge 95\%$, `ACOUSTIC_DUPLICATE`)**:
+  - Huellas acústicas Chromaprint (`fpcalc`) con distancia de Hamming bitwise y alineamiento temporal dinámico (ventana de offset hasta 600 frames).
   - Detecta la misma pista/grabación original sin importar el formato (`MP3`, `FLAC`, `WAV`, `M4A`, `OGG`, `AAC`), la tasa de bits (320 kbps vs 128 kbps), normalizaciones de volumen o compresión.
-- **Posibles Duplicados / Versiones ($80\% - 94.9\%$)**:
+- **Posibles Duplicados / Versiones ($80\% - 94.9\%$, `POSSIBLE_DUPLICATE`)**:
   - Identifica remasterizaciones, radio edits, versiones extendidas o directos que comparten la misma estructura armónica.
-- **Revisión Manual de Baja Confianza ($40\% - 79.9\%$)**:
-  - Aísla intencionalmente modificaciones extremas (ej. alteraciones severas de tempo, inversión de fase, EQ profunda).
-  - Los grupos en esta franja nacen **siempre** protegidos contra auto-eliminación, forzando la intervención humana.
+- **Revisión Manual de Baja Confianza ($40\% - 79.9\%$, `LOW_CONFIDENCE_REVIEW`)**:
+  - Aísla intencionalmente modificaciones extremas (ej. alteraciones severas de tempo, inversión de fase, ecualización agresiva).
+  - Los grupos en esta franja nacen **siempre** protegidos contra auto-eliminación (`requires_manual_review = True`), forzando la intervención humana.
 - **Cero Falsos Positivos y Aislamiento Seguro**:
-  - Agrupamiento matemático riguroso mediante conjuntos disjuntos (*Disjoint-Set Union / Union-Find*). Canciones distintas del mismo artista jamás se agrupan juntas.
-  - Protección a nivel de modelo mediante el flag `requires_manual_review` que desactiva cualquier regla de limpieza automática masiva.
+  - Agrupamiento matemático riguroso mediante conjuntos disjuntos (*Disjoint-Set Union / Union-Find*).
+  - **Mitigación de Transitividad Insegura (`has_weak_link`)**: Si dentro de un clúster existe un enlace de baja confianza o posible duplicado entre pistas intermedias, el grupo completo se degrada y exige confirmación manual.
+  - **Prefiltro LSH de Alto Rendimiento**: Indexación por tokens de hash sin dependencia de buckets de duración restrictivos, con umbral de coincidencia robusto (`min_hits=3`) y soporte para mega-clústeres (`max_bucket_size=500`).
+  - Protección estricta en el motor `file_manager.py` y CLI: los grupos marcados para revisión manual son ignorados por los comandos de limpieza automática para blindar los datos del usuario.
 
 ### 2. 🔬 Auditoría Espectral y Detección de Falsos Lossless (*Fake FLAC*)
 - **Análisis FFT de Corte Espectral (*Spectral Rolloff*)**:
@@ -126,11 +128,11 @@ flowchart TD
     C -- Sí --> D[Recuperar Huella & Calidad Instantáneamente]
     C -- No --> E[Fase 2: Extracción Chromaprint fpcalc & Análisis FFT]
     E --> F[Guardar en SQLite WAL]
-    D --> G[Fase 3: Detección de Duplicados Exactos SHA-256 / Audio Hash]
+    D --> G[Fase 3: Cortocircuito Duplicados Exactos SHA-256 / Audio PCM Hash]
     F --> G
-    G --> H[Fase 4: Comparación Acústica Hamming & Alignment]
-    H --> I[Fase 5: Agrupamiento Union-Find Disjoint-Set]
-    I --> J[Fase 6: Ranking de Calidad & Recomendación Automática]
+    G --> H[Fase 4: Prefiltro LSH & Comparación Acústica Hamming / Offset]
+    H --> I[Fase 5: Agrupamiento Union-Find con Mitigación de Transitividad]
+    I --> J[Fase 6: Ranking de Calidad & Asignación de Acciones Seguras]
     J --> K[Resultados Listos para GUI / CLI]
 ```
 
@@ -242,20 +244,24 @@ Este `.exe` es completamente autónomo y puede distribuirse en cualquier PC con 
 
 ## 🧪 Suite de Pruebas Automatizadas
 
-El proyecto cuenta con una suite exhaustiva de pruebas unitarias y de integración que utiliza síntesis de audio programática para verificar la exactitud de los algoritmos:
+El proyecto cuenta con una suite exhaustiva de 32 pruebas unitarias e integración que valida de extremo a extremo la integridad matemática y funcional del sistema:
 
 ```bash
 python -m unittest discover tests
 ```
 
 ### Escenarios cubiertos por las pruebas:
-- ✔️ Copias idénticas bit-a-bit en disco (SHA-256).
-- ✔️ Mismo audio con diferentes etiquetas ID3 y metadatos alterados.
+- ✔️ Copias idénticas bit-a-bit en disco (`EXACT_HASH`).
+- ✔️ Mismo audio con diferentes etiquetas ID3, metadatos y contenedores (`EXACT_AUDIO`).
 - ✔️ Mismo audio convertido entre distintos formatos (`MP3`, `FLAC`, `WAV`, `OGG`, `M4A`).
-- ✔️ Mismo audio a diferentes tasas de bits ($320\text{ kbps}$ vs $128\text{ kbps}$).
+- ✔️ Mismo audio a diferentes tasas de bits ($320\text{ kbps}$ vs $128\text{ kbps}$) y canales (Stereo a Mono).
 - ✔️ Detección de Falsos Lossless (*Fake FLAC* inflado desde MP3 de $128\text{ kbps}$).
 - ✔️ Remasterizaciones y variaciones de ganancia/ecualización.
-- ✔️ Pistas con diferencias de duración (Radio Edits y versiones extendidas).
+- ✔️ Tolerancia a desalineación temporal y cortes de inicio (hasta 600 frames).
+- ✔️ Pistas con diferencias extremas de duración (Radio Edits y versiones extendidas).
+- ✔️ Mitigación de transitividad insegura (`has_weak_link`) y protección de borrado en clústeres heterogéneos.
+- ✔️ Escalabilidad del prefiltro LSH en mega-clústeres de 60+ duplicados idénticos.
+- ✔️ Operaciones atómicas de gestión de archivos (`FileManager`) e integridad ante errores de permisos.
 - ✔️ Verificación estricta de **cero falsos positivos** entre canciones distintas del mismo artista.
 - ✔️ Rendimiento, persistencia y atomicidad de la base de datos SQLite WAL.
 
@@ -269,15 +275,15 @@ Detector-de-huellas-dactilares-ac-stico-y-duplicado-de-audio/
 │   └── fpcalc.exe              # Binario Chromaprint de alta velocidad
 ├── core/
 │   ├── __init__.py
-│   ├── models.py               # Modelos de datos (AudioTrack, DuplicateGroup, ScanStats)
+│   ├── models.py               # Modelos de datos (AudioTrack, DuplicateGroup, EvidenceReport)
 │   ├── fingerprint.py          # Extracción Chromaprint, hashes PCM y serialización
 │   ├── metadata_extractor.py   # Extracción de metadatos con Mutagen
 │   ├── quality_analyzer.py     # Análisis espectral FFT, Fake Lossless y scoring 0-100
-│   ├── comparator.py           # Alineamiento temporal y cálculo de distancia de Hamming
-│   ├── clustering.py           # Agrupamiento disjunto (Union-Find) y ranking de calidad
+│   ├── comparator.py           # Alineamiento temporal, Hamming y ventana de offset
+│   ├── clustering.py           # Prefiltro LSH, Union-Find y mitigación has_weak_link
 │   ├── database.py             # Motor de persistencia SQLite con modo WAL
 │   ├── scanner.py              # Orquestador recursivo de escaneo multiproceso
-│   └── file_manager.py         # Operaciones seguras en disco (mover, marcar, eliminar)
+│   └── file_manager.py         # Operaciones seguras en disco y protección contra borrado
 ├── gui/
 │   ├── __init__.py
 │   ├── app.py                  # Ventana principal moderna en PyQt6 y orquestador GUI
@@ -296,12 +302,17 @@ Detector-de-huellas-dactilares-ac-stico-y-duplicado-de-audio/
 │       ├── settings_view.py    # Vista de configuración de motor y mantenimiento de BD
 │       ├── sidebar.py          # Barra lateral de navegación con iconos QtAwesome
 │       └── stats_bar.py        # Barra superior con estadísticas globales
+├── scripts/
+│   ├── generate_dataset.py     # Generador de dataset de audio sintético y adversarial
+│   └── evaluation_runner.py    # Ejecutor de benchmarks automatizados y métricas
 ├── tests/
 │   ├── __init__.py
-│   ├── test_clustering.py      # Pruebas de agrupamiento Union-Find
-│   ├── test_comparator.py      # Pruebas de comparación acústica y Hamming
+│   ├── test_clustering.py      # Pruebas de agrupamiento, transitividad y escalabilidad LSH
+│   ├── test_comparator.py      # Pruebas de comparación acústica, Hamming y offset
 │   ├── test_database.py        # Pruebas de base de datos SQLite y caché
 │   ├── test_end_to_end.py      # Suite integral end-to-end con síntesis de audio
+│   ├── test_file_manager.py    # Pruebas de seguridad de operaciones en disco y permisos
+│   ├── test_framework.py       # Pruebas del marco de evaluación adversarial
 │   ├── test_performance.py     # Pruebas de rendimiento y estrés
 │   └── test_quality.py         # Pruebas de detección de falsos lossless y FFT
 ├── app_icon.ico                # Icono de la aplicación en formato ICO
@@ -310,6 +321,7 @@ Detector-de-huellas-dactilares-ac-stico-y-duplicado-de-audio/
 ├── build_installer.spec        # Especificación técnica de empaquetado de PyInstaller
 ├── main.py                     # Punto de entrada principal (CLI / GUI)
 ├── requirements.txt            # Dependencias del proyecto
+├── walkthrough.md              # Documento técnico consolidado de auditorías y benchmarks
 └── README.md                   # Documentación técnica completa
 ```
 
