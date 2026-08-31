@@ -29,46 +29,62 @@ Una aplicación de escritorio moderna, robusta y de alto rendimiento en Python d
 
 ## 🌟 Características Principales
 
-### 1. 🔍 Detección de Duplicados en 4 Niveles Jerárquicos
-- **Duplicados Exactos (100%)**:
-  - *Bit-a-bit en disco (`EXACT_HASH`)*: Coincidencia instantánea SHA-256 de archivos idénticos en disco.
-  - *Flujo de audio PCM decodificado (`EXACT_AUDIO`)*: Hash de audio PCM decodificado crudo, detectando pistas idénticas con distintos contenedores (`.flac` vs `.wav` vs `.mp3`) o metadatos ID3 alterados sin depender de heurísticas.
-- **Duplicados Acústicos ($\ge 95\%$, `ACOUSTIC_DUPLICATE`)**:
-  - Huellas acústicas Chromaprint (`fpcalc`) con distancia de Hamming bitwise y alineamiento temporal dinámico (ventana de offset hasta 600 frames).
-  - Detecta la misma pista/grabación original sin importar el formato (`MP3`, `FLAC`, `WAV`, `M4A`, `OGG`, `AAC`), la tasa de bits (320 kbps vs 128 kbps), normalizaciones de volumen o compresión.
-- **Posibles Duplicados / Versiones ($80\% - 94.9\%$, `POSSIBLE_DUPLICATE`)**:
-  - Identifica remasterizaciones, radio edits, versiones extendidas o directos que comparten la misma estructura armónica.
-- **Revisión Manual de Baja Confianza ($40\% - 79.9\%$, `LOW_CONFIDENCE_REVIEW`)**:
-  - Aísla intencionalmente modificaciones extremas (ej. alteraciones severas de tempo, inversión de fase, ecualización agresiva).
-  - Los grupos en esta franja nacen **siempre** protegidos contra auto-eliminación (`requires_manual_review = True`), forzando la intervención humana.
-- **Cero Falsos Positivos y Aislamiento Seguro**:
-  - Agrupamiento matemático riguroso mediante conjuntos disjuntos (*Disjoint-Set Union / Union-Find*).
-  - **Mitigación de Transitividad Insegura (`has_weak_link`)**: Si dentro de un clúster existe un enlace de baja confianza o posible duplicado entre pistas intermedias, el grupo completo se degrada y exige confirmación manual.
-  - **Prefiltro LSH de Alto Rendimiento**: Indexación por tokens de hash sin dependencia de buckets de duración restrictivos, con umbral de coincidencia robusto (`min_hits=3`) y soporte para mega-clústeres (`max_bucket_size=500`).
-  - Protección estricta en el motor `file_manager.py` y CLI: los grupos marcados para revisión manual son ignorados por los comandos de limpieza automática para blindar los datos del usuario.
+### 1. 🎧 Escucha antes de Decidir (Reproducción & Comparador A/B en Vivo)
+- **Reproductor Integrado Persistente**: Barra de reproducción inferior con motor de audio Pygame para preescuchar cualquier pista de tu biblioteca de inmediato.
+- **Comparador A/B Side-by-Side con Playhead Sincronizado**: Conmuta al milisegundo exacto entre dos pistas manteniendo la misma posición temporal de reproducción, permitiendo identificar al instante diferencias auditivas sutiles de compresión, ecualización, dinamismo o cortes.
+- **Control Total en Manos del Usuario**: El sistema analiza, clasifica con rigor matemático y recomienda la mejor opción, pero **la decisión final de conservar, mover o eliminar siempre permanece bajo el control del usuario**. Nunca se realiza un borrado sin confirmación explícita.
 
-### 2. 🔬 Auditoría Espectral y Detección de Falsos Lossless (*Fake FLAC*)
+### 2. 🔍 Detección de Duplicados en 4 Niveles Jerárquicos
+- **Duplicados Exactos (100%)**:
+  - *Bit-a-bit en disco (`EXACT_HASH`)*: Coincidencia instantánea SHA-256 de archivos físicamente idénticos.
+  - *Flujo de audio PCM decodificado (`EXACT_AUDIO`)*: Cortocircuito exacto por hash de audio crudo decodificado, identificando canciones idénticas con distintos formatos (`.flac` vs `.wav` vs `.mp3`) o metadatos ID3 modificados.
+- **Duplicados Acústicos ($\ge 95\%$, `ACOUSTIC_DUPLICATE`)**:
+  - Huellas acústicas Chromaprint (`fpcalc`) con comparación Hamming bitwise y ventana de alineamiento temporal dinámico de hasta **600 frames**.
+  - Identifica la misma grabación original sin importar variaciones de formato (`MP3`, `FLAC`, `WAV`, `M4A`, `OGG`, `AAC`), tasa de bits (320 kbps vs 128 kbps), normalización de volumen o compresión.
+- **Posibles Duplicados / Versiones ($80\% - 94.9\%$, `POSSIBLE_DUPLICATE`)**:
+  - Detecta remasterizaciones, radio edits, versiones extendidas o grabaciones en vivo que comparten la misma base armónica.
+- **Revisión Manual de Baja Confianza ($40\% - 79.9\%$, `LOW_CONFIDENCE_REVIEW`)**:
+  - Aísla intencionalmente modificaciones acústicas severas (alteraciones de tempo, inversión de fase, ecualizaciones extremas).
+  - Los grupos en esta franja nacen **siempre protegidos** contra auto-eliminación (`requires_manual_review = True`), forzando la intervención humana.
+
+### 3. 🛡️ Seguridad Blindada y Prevención contra Pérdida de Datos
+- **Mitigación de Transitividad Insegura (`has_weak_link`)**: Si dentro de un clúster una pista intermedia vincula débilmente dos audios distintos, el grupo completo se degrada y exige confirmación manual obligatoria.
+- **Protección de Copia Única**: El sistema bloquea activamente cualquier intento de eliminar todas las copias de un grupo; siempre se preserva al menos una pista intacta.
+- **Inmunidad para Pistas [CONSERVAR]**: Jamás se permite el borrado de archivos marcados para mantenerse.
+- **Aislamiento en Limpieza Automática**: El motor `file_manager.py` y el CLI ignoran preventivamente cualquier grupo sin resolución humana explícita.
+- **Carpetas de Respaldo y Simulación (*Dry-Run*)**: Opción de mover archivos duplicados a un directorio de backup seguro antes de cualquier borrado definitivo, con capacidad de simular acciones en consola sin tocar el disco.
+
+### 4. 🔬 Auditoría Espectral y Detección de Falsos Lossless (*Fake FLAC*)
 - **Análisis FFT de Corte Espectral (*Spectral Rolloff*)**:
   - Detecta automáticamente si un archivo `.flac` o `.wav` fue convertido artificialmente (*upscaled / transcoded*) a partir de un archivo lossy de baja calidad (corte en $\sim 16\text{ kHz}$ para 128 kbps o $\sim 20\text{ kHz}$ para 320 kbps).
-- **Visualizador Espectral Gráfico**:
-  - Gráfico interactivo de barras espectrales (20 Hz a 22 kHz) que ilustra visualmente el corte de frecuencias reales de cada pista.
+- **Visualizador Espectral Gráfico Interactivo**:
+  - Gráfico de barras de frecuencia (20 Hz a 22 kHz) que ilustra visualmente el corte real del espectro para cada pista.
 
-### 3. 🏆 Puntuación Técnica de Calidad Inteligente (0 a 100)
+### 5. 🏆 Puntuación Técnica de Calidad Inteligente (0 a 100)
 Calcula automáticamente qué archivo es el mejor dentro de cada grupo de duplicados evaluando:
 - Fidelidad real del formato (Lossless auténtico vs Lossy vs Fake Lossless).
 - Tasa de bits real (*bitrate*) y ancho de banda espectral útil.
 - Frecuencia de muestreo (44.1 kHz, 48 kHz, 96 kHz / 192 kHz Hi-Res) y profundidad de bits (16-bit vs 24-bit).
 - Integridad temporal y duración completa de la pista.
-- Asigna recomendaciones automáticas `[CONSERVAR]` / `[ELIMINAR]` con justificación técnica detallada.
+- Asigna recomendaciones automáticas `[CONSERVAR]` / `[ELIMINAR]` con justificación técnica detallada y cálculo de ahorro de espacio en disco.
 
-### 4. 🎚️ Comparador A/B Side-by-Side en Tiempo Real
-- Permite comparar instantáneamente dos pistas lado a lado.
-- **Conmutación continua A/B**: Alterna entre la Pista A y la Pista B manteniendo exactamente la misma posición de reproducción (*playhead*), ideal para evaluar diferencias auditivas de compresión y ecualización.
-
-### 5. ⚡ Rendimiento Extremo para Colecciones Gigantes
-- **Caché persistente SQLite con modo WAL (Write-Ahead Logging)**: Re-escaneo de archivos inalterados en $0.01\text{ ms}$.
-- **Procesamiento paralelo multi-núcleo**: Decodificación y extracción de huellas acústicas simultánea en todos los hilos de CPU disponibles.
+### 6. ⚡ Rendimiento Extremo y Optimización Universal
+- **Prefiltro LSH de Alto Rendimiento**: Indexación por tokens de hash acústico sin dependencia de buckets de duración rígidos, con selectividad estricta (`min_hits = 3`) y escalabilidad comprobada en mega-clústeres (`max_bucket_size = 500`).
+- **Caché persistente SQLite con modo WAL (Write-Ahead Logging)**: Re-escaneo instantáneo de archivos inalterados en menos de $0.01\text{ ms}$.
+- **Procesamiento paralelo adaptativo**: Decodificación y extracción de huellas acústicas simultánea aprovechando todos los núcleos de CPU disponibles sin congelar el sistema operativo.
+- **Diseñado para cualquier equipo**: Optimizado tanto para laptops con discos mecánicos HDD y CPUs modestas como para estaciones de trabajo con SSD NVMe.
 - **Control total del escáner**: Capacidad de Pausar, Reanudar y Cancelar el análisis en cualquier momento.
+
+### 7. 📚 Explorador y Gestión Integral de Biblioteca
+- Explorador completo de todas las canciones indexadas en la base de datos local.
+- Búsqueda instantánea en tiempo real por título, artista, álbum o ruta de archivo.
+- Filtros avanzados por calidad, formato y estado de duplicados.
+- Exportación de auditoría completa y recomendaciones a formato CSV.
+
+### 8. 🌐 Soporte Multiformato Universal y Modo Dual (GUI / CLI)
+- **Formatos compatibles**: `.mp3`, `.flac`, `.wav`, `.m4a`, `.ogg`, `.aac`, `.wma`, `.opus`.
+- **Modo Interfaz Gráfica (GUI PyQt6)**: Entorno visual moderno con tema oscuro profesional y feedback en tiempo real.
+- **Modo Consola (CLI / Headless)**: Ideal para automatización en servidores, scripts programados y escaneos desatendidos.
 
 ---
 
