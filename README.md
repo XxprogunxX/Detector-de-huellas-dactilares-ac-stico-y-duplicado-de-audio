@@ -102,7 +102,8 @@ La interfaz gráfica está construida sobre **PyQt6** con un sistema de diseño 
 │ 🔬 Calidad      │                                                        │
 │ ⚙️ Ajustes      │                                                        │
 ├─────────────────┴────────────────────────────────────────────────────────┤
-│ 🎵 [Bottom Player Bar]: Carátula | Info Pista | Barra Progreso | Volumen  │
+│ 🎵 [Barra Preescucha]: [⏮][▶/⏸][⏭] | Tag Canal | Artista - Título | Specs |
+│                        01:42 ▇▅█▆▄▃▂  (Waveform Scrubbing Clic/Drag)  06:23     │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -119,6 +120,7 @@ La interfaz gráfica está construida sobre **PyQt6** con un sistema de diseño 
    - Tarjetas interactivas por grupo de duplicados con porcentaje de similitud y badge de tipo.
    - Tabla comparativa técnica completa por pista (Formato, Bitrate, Duración, Tamaño, Calidad).
    - Acciones individuales y por lote: abrir en el Explorador de Windows, reproducir, cambiar acción `CONSERVAR`/`ELIMINAR` y lanzar comparador A/B.
+   - **Persistencia y Recuperación Inmediata**: Guarda el estado de la sesión (`last_session.json`) y, en caso de reinicio, recupera los duplicados en $<1\text{s}$ desde la caché SQLite sin necesidad de volver a escanear.
 4. **🔬 Calidad (`QualityView`)**:
    - Auditoría integral de la salud acústica de la biblioteca.
    - Métricas de Lossless reales vs Falsos Lossless detectados.
@@ -128,7 +130,11 @@ La interfaz gráfica está construida sobre **PyQt6** con un sistema de diseño 
    - Configuración de hilos de CPU y tamaño de bloques FFT.
    - Mantenimiento de base de datos SQLite (Optimización `VACUUM`, limpieza de huellas y reinicio seguro).
    - Definición de carpeta de respaldo para movimientos seguros de duplicados.
-6. **🛡️ Modal de Eliminación Segura (`DeleteModal`)**:
+6. **🎧 Barra de Preescucha y Scrubbing Interactivo (`BottomPlayerBar`)**:
+   - Controles de transporte circulares ($\pm10\text{s}$, Play/Pausa cian).
+   - Ficha técnica completa de audio (`FLAC | 24-bit | 96 kHz | Stereo` o `MP3 | 320 kbps | 44.1 kHz | Stereo`).
+   - **Waveform Interactivo con Scrubbing Libre**: Permite hacer clic o arrastrar con el ratón sobre cualquier barra vertical para saltar instantáneamente a ese punto de la pista.
+7. **🛡️ Modal de Eliminación Segura (`DeleteModal`)**:
    - Protección estricta: Impide eliminar todas las copias de un grupo o borrar pistas marcadas como `CONSERVAR`.
    - Soporte para mover a carpeta de respaldo o eliminación permanente controlada.
 

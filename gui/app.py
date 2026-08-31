@@ -99,7 +99,7 @@ class AudioDuplicateDetectorApp(QMainWindow):
                 "groups": [g.to_dict() for g in self.all_groups]
             }
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f)
+                json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
 
@@ -114,18 +114,37 @@ class AudioDuplicateDetectorApp(QMainWindow):
                     data = json.load(f)
                     saved_folder = data.get("folder", "")
                     raw_groups = data.get("groups", [])
-                    saved_groups = [DuplicateGroup.from_dict(g) for g in raw_groups]
+                    saved_groups = [DuplicateGroup.from_dict(g) for g in raw_groups if isinstance(g, dict)]
         except Exception:
             pass
 
         target_folder = initial_folder or saved_folder
-        if target_folder and os.path.exists(target_folder):
-            self.set_active_folder(target_folder)
-
         if saved_groups:
             self.all_groups = saved_groups
+
+        if target_folder and os.path.exists(target_folder):
+            self.set_active_folder(target_folder, save_session=False)
+
+        # Smart instant recovery: if no saved groups in json, but DB has tracks for this folder,
+        # cluster them instantly from SQLite cache!
+        if not self.all_groups and target_folder and os.path.exists(target_folder):
+            try:
+                cached_tracks = self.db.get_all_tracks(dir_prefix=target_folder, include_fingerprints=True)
+                if cached_tracks and len(cached_tracks) > 1:
+                    from core.clustering import cluster_duplicates
+                    self.all_groups = cluster_duplicates(
+                        cached_tracks,
+                        similarity_threshold=self.scanner.similarity_threshold
+                    )
+                    self._save_current_session()
+            except Exception:
+                pass
+
+        if self.all_groups:
+            self.sidebar.set_active_section("Duplicados")
+            self.stack.setCurrentIndex(2)
             self._refresh_view()
-        elif not self.all_groups:
+        else:
             self._show_empty_state()
 
 
@@ -261,14 +280,15 @@ class AudioDuplicateDetectorApp(QMainWindow):
             self.stack.setCurrentIndex(4)
             self.settings_view.refresh_db_stats()
 
-    def set_active_folder(self, folder: str):
+    def set_active_folder(self, folder: str, save_session: bool = True):
         self.current_folder = folder
         self.sidebar.set_folder(folder)
         self.sidebar.storage_bar.update_from_folder(folder)
         self.scanner_view.set_folder(folder)
         self.library_view.set_folder(folder)
         self.quality_view.set_folder(folder)
-        self._save_current_session()
+        if save_session:
+            self._save_current_session()
 
     def _choose_folder(self):
         folder = QFileDialog.getExistingDirectory(
