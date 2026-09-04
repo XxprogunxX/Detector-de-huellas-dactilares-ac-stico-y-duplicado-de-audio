@@ -133,8 +133,7 @@ class AudioDuplicateDetectorApp(QMainWindow):
                 if cached_tracks and len(cached_tracks) > 1:
                     from core.clustering import cluster_duplicates
                     self.all_groups = cluster_duplicates(
-                        cached_tracks,
-                        similarity_threshold=self.scanner.similarity_threshold
+                        cached_tracks
                     )
                     self._save_current_session()
             except Exception:
@@ -535,6 +534,7 @@ class AudioDuplicateDetectorApp(QMainWindow):
         if not self.filtered_groups:
             return
         mod = auto_apply_recommendations(self.filtered_groups)
+        self._save_current_session()
         self._refresh_view()
         QMessageBox.information(
             self, "Auto-Selección",
@@ -547,11 +547,15 @@ class AudioDuplicateDetectorApp(QMainWindow):
         )
         if not target_dir:
             return
-        success, failed, logs = move_marked_duplicates(self.filtered_groups, target_dir)
+        success, failed, logs = move_marked_duplicates(
+            self.filtered_groups, target_dir, db=self.db
+        )
         msg = f"Archivos movidos: {success}"
         if failed:
             msg += f"\nErrores al mover: {failed}"
         QMessageBox.information(self, "Mover Completado", msg)
+        self._save_current_session()
+        self.library_view.reload_tracks()
         self._refresh_view()
 
     def _handle_delete_duplicates(self):
@@ -566,13 +570,15 @@ class AudioDuplicateDetectorApp(QMainWindow):
             )
             return
 
-        modal = DeleteModal(self.filtered_groups, parent=self)
+        modal = DeleteModal(self.filtered_groups, db=self.db, parent=self)
         if modal.exec() == QDialog.DialogCode.Accepted:
             success, failed, logs = modal.execute_action()
             msg = f"Archivos procesados: {success}"
             if failed:
                 msg += f"\nErrores: {failed}"
             QMessageBox.information(self, "Acción completada", msg)
+            self._save_current_session()
+            self.library_view.reload_tracks()
             self._refresh_view()
 
     def closeEvent(self, event):

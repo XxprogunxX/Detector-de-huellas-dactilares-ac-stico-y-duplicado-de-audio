@@ -33,6 +33,55 @@ class TestModels(unittest.TestCase):
         self.assertEqual(track_db.fingerprint_raw, [], 
                          "from_dict debe usar un arreglo vacío por defecto si la huella no viene en el dicc")
 
+    def test_requires_manual_review_roundtrip(self):
+        """TEST A: requires_manual_review=True serializar -> deserializar conserva True."""
+        from core.models import DuplicateGroup, DuplicateType
+        group = DuplicateGroup(
+            group_id="G1",
+            primary_type=DuplicateType.ACOUSTIC_DUPLICATE,
+            requires_manual_review=True
+        )
+        data = group.to_dict()
+        self.assertIn("requires_manual_review", data)
+        self.assertTrue(data["requires_manual_review"])
+
+        restored = DuplicateGroup.from_dict(data)
+        self.assertTrue(restored.requires_manual_review)
+
+    def test_legacy_session_possible_duplicate_auto_protects(self):
+        """TEST B: Sesión antigua sin campo requires_manual_review o con False en POSSIBLE_DUPLICATE debe terminar con True."""
+        from core.models import DuplicateGroup, DuplicateType
+        # Caso 1: Campo ausente
+        legacy_data = {
+            "group_id": "G2",
+            "primary_type": DuplicateType.POSSIBLE_DUPLICATE.value,
+            "tracks": []
+        }
+        group = DuplicateGroup.from_dict(legacy_data)
+        self.assertTrue(group.requires_manual_review, "POSSIBLE_DUPLICATE debe forzar requires_manual_review=True")
+
+        # Caso 2: Campo explícitamente False en archivo corrupto/antiguo
+        corrupted_data = {
+            "group_id": "G2_corrupt",
+            "primary_type": DuplicateType.POSSIBLE_DUPLICATE.value,
+            "requires_manual_review": False,
+            "tracks": []
+        }
+        group2 = DuplicateGroup.from_dict(corrupted_data)
+        self.assertTrue(group2.requires_manual_review, "Defensa en profundidad: POSSIBLE_DUPLICATE con False debe forzarse a True")
+
+    def test_low_confidence_review_always_protected(self):
+        """LOW_CONFIDENCE_REVIEW debe estar protegido obligatoriamente."""
+        from core.models import DuplicateGroup, DuplicateType
+        legacy_data = {
+            "group_id": "G3",
+            "primary_type": DuplicateType.LOW_CONFIDENCE_REVIEW.value,
+            "requires_manual_review": False,
+            "tracks": []
+        }
+        group = DuplicateGroup.from_dict(legacy_data)
+        self.assertTrue(group.requires_manual_review, "LOW_CONFIDENCE_REVIEW debe forzar requires_manual_review=True")
+
 
 if __name__ == "__main__":
     unittest.main()

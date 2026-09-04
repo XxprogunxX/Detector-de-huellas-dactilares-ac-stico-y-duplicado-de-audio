@@ -130,16 +130,20 @@ def compute_file_sha256(filepath: str, block_size: int = 131072) -> str:
 
 def compute_audio_pcm_hash(filepath: str, sample_rate: int = 11025, max_seconds: float = 30.0) -> str:
     """
-    Decodes the first `max_seconds` of audio to raw mono PCM with ffmpeg and computes MD5.
-    Identical audio recordings with different ID3 tags or containers will match here.
-    Limiting to 30s reduces RAM usage ~10x for long files and keeps the hash reliable.
-    ffmpeg is launched at BELOW_NORMAL CPU priority to keep the system responsive.
+    Decodes the first `max_seconds` (default 30s) of audio to raw mono PCM with ffmpeg and computes MD5.
+    
+    NOTA DE SEGURIDAD Y ARQUITECTURA:
+    Este hash actúa como un PREFILTRO RÁPIDO de prefijo de audio normalizado y NO constituye
+    por sí solo prueba de identidad completa del archivo. Dos audios distintos con una intro idéntica
+    pueden colisionar aquí.
+    La clasificación final como EXACT_AUDIO requiere duraciones compatibles (|dur_a - dur_b| <= 0.5s)
+    y verificación en streaming del flujo PCM normalizado completo con verify_full_normalized_pcm_match.
     """
     try:
         cmd = [
             "ffmpeg", "-v", "quiet", "-nostdin",
             "-i", filepath,
-            "-t", str(max_seconds),   # only first 30s, not entire file
+            "-t", str(max_seconds),   # only first 30s as fast pre-filter
             "-f", "s16le", "-ac", "1", "-ar", str(sample_rate),
             "-"
         ]
@@ -165,6 +169,101 @@ def compute_audio_pcm_hash(filepath: str, sample_rate: int = 11025, max_seconds:
             return ""
     except Exception:
         return ""
+
+
+def verify_full_normalized_pcm_match(
+    filepath_a: str,
+    filepath_b: str,
+    sample_rate: int = 11025,
+    chunk_size: int = 65536
+) -> bool:
+    """
+    Decodes both complete audio files to normalized raw mono PCM (s16le at sample_rate)
+    using streaming FFmpeg processes and compares them block by block.
+
+    Safety and performance guarantees:
+    - Never loads full files into RAM: streams in chunks (default 64 KB).
+    - Early exit: terminates immediately upon first mismatch or stream length difference.
+    - Fails safe: if either file does not exist, decodes to 0 bytes, or encounters any error,
+      returns False (never assumes equivalence).
+    - Low priority CPU usage: drops subprocesses to BELOW_NORMAL priority.
+    """
+    if not filepath_a or not filepath_b:
+        return False
+    if not os.path.isfile(filepath_a) or not os.path.isfile(filepath_b):
+        return False
+
+    cmd_a = [
+        "ffmpeg", "-v", "quiet", "-nostdin",
+        "-i", filepath_a,
+        "-f", "s16le", "-ac", "1", "-ar", str(sample_rate),
+        "-"
+    ]
+    cmd_b = [
+        "ffmpeg", "-v", "quiet", "-nostdin",
+        "-i", filepath_b,
+        "-f", "s16le", "-ac", "1", "-ar", str(sample_rate),
+        "-"
+    ]
+
+    startupinfo = _get_low_priority_startupinfo() if sys.platform == "win32" else None
+    proc_a = None
+    proc_b = None
+
+    try:
+        proc_a = subprocess.Popen(
+            cmd_a,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            startupinfo=startupinfo
+        )
+        proc_b = subprocess.Popen(
+            cmd_b,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            startupinfo=startupinfo
+        )
+
+        _set_subprocess_low_priority(proc_a)
+        _set_subprocess_low_priority(proc_b)
+
+        total_read = 0
+        while True:
+            chunk_a = proc_a.stdout.read(chunk_size)
+            chunk_b = proc_b.stdout.read(chunk_size)
+
+            if chunk_a != chunk_b:
+                return False
+
+            if not chunk_a:  # Both reached EOF simultaneously
+                break
+
+            total_read += len(chunk_a)
+
+        # Disallow empty decoded streams
+        if total_read == 0:
+            return False
+
+        # Confirm both FFmpeg processes finish cleanly without errors
+        try:
+            ret_a = proc_a.wait(timeout=10.0)
+            ret_b = proc_b.wait(timeout=10.0)
+            return ret_a == 0 and ret_b == 0
+        except subprocess.TimeoutExpired:
+            return False
+
+    except Exception:
+        return False
+    finally:
+        for p in (proc_a, proc_b):
+            if p is not None:
+                try:
+                    if p.poll() is None:
+                        p.kill()
+                    if p.stdout is not None:
+                        p.stdout.close()
+                except Exception:
+                    pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────

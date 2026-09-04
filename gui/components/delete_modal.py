@@ -118,9 +118,10 @@ class DeleteModal(QDialog):
             modal.execute_action()
     """
 
-    def __init__(self, groups: List[DuplicateGroup], parent=None):
+    def __init__(self, groups: List[DuplicateGroup], db=None, parent=None):
         super().__init__(parent)
         self.groups = groups
+        self.db = db
         self._selected_mode = "trash"   # "backup" | "trash" | "permanent"
         self._backup_folder: Optional[str] = None
         self._export_csv = False
@@ -336,34 +337,29 @@ class DeleteModal(QDialog):
     # ── Public API ────────────────────────────────────────────────
     def execute_action(self) -> tuple[int, int, list[str]]:
         """
-        Execute the selected deletion mode on marked files.
+        Execute the selected deletion mode on marked files using centralized FileOperationService.
         Returns (success_count, failed_count, log_lines).
         """
-        from core.file_manager import (
-            move_marked_duplicates,
-            delete_marked_duplicates_permanently,
-        )
-        import send2trash
+        from core.file_manager import FileOperationService
 
         success = 0
         failed = 0
         logs: list[str] = []
 
         if self._selected_mode == "backup" and self._backup_folder:
-            success, failed, logs = move_marked_duplicates(self.groups, self._backup_folder)
+            success, failed, logs = FileOperationService.backup(
+                self.groups, self._backup_folder, db=self.db
+            )
 
         elif self._selected_mode == "trash":
-            for t in self._files_to_delete:
-                try:
-                    send2trash.send2trash(t.filepath)
-                    logs.append(f"[OK] Papelera ← {t.filepath}")
-                    success += 1
-                except Exception as e:
-                    logs.append(f"[ERR] {t.filepath}: {e}")
-                    failed += 1
+            success, failed, logs = FileOperationService.trash(
+                self.groups, db=self.db
+            )
 
         elif self._selected_mode == "permanent":
-            success, failed, logs = delete_marked_duplicates_permanently(self.groups)
+            success, failed, logs = FileOperationService.delete_permanently(
+                self.groups, db=self.db
+            )
 
         if self._export_csv:
             self._write_csv(logs)

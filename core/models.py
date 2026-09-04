@@ -189,6 +189,7 @@ class DuplicateGroup:
             "best_track_reason": self.best_track_reason,
             "average_similarity": self.average_similarity,
             "space_saving_bytes": self.space_saving_bytes,
+            "requires_manual_review": self.requires_manual_review,
             "tracks": [t.to_dict() for t in self.tracks]
         }
 
@@ -200,6 +201,13 @@ class DuplicateGroup:
             ptype = DuplicateType.ACOUSTIC_DUPLICATE
 
         tracks = [AudioTrack.from_dict(t) for t in data.get("tracks", [])]
+
+        # Defensive fallback: restore serialized flag, but strictly enforce True
+        # for POSSIBLE_DUPLICATE and LOW_CONFIDENCE_REVIEW to prevent accidental auto-deletion
+        req_review = bool(data.get("requires_manual_review", False))
+        if ptype in (DuplicateType.POSSIBLE_DUPLICATE, DuplicateType.LOW_CONFIDENCE_REVIEW):
+            req_review = True
+
         return cls(
             group_id=data.get("group_id", ""),
             primary_type=ptype,
@@ -207,7 +215,8 @@ class DuplicateGroup:
             best_track_path=data.get("best_track_path", ""),
             best_track_reason=data.get("best_track_reason", ""),
             average_similarity=float(data.get("average_similarity", 100.0)),
-            space_saving_bytes=int(data.get("space_saving_bytes", 0))
+            space_saving_bytes=int(data.get("space_saving_bytes", 0)),
+            requires_manual_review=req_review
         )
 
 

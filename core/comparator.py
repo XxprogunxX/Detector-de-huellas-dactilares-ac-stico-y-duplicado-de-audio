@@ -113,14 +113,27 @@ def compare_tracks(track_a: AudioTrack, track_b: AudioTrack) -> EvidenceReport:
         report.reasons.append("Duplicado Exacto: Archivos idénticos byte por byte (mismo hash SHA-256).")
         return report
 
-    # 2. Exact Decoded PCM Audio Hash
+    # 2. Exact Decoded PCM Audio Hash (Prefix Match + Duration & Full PCM Verification)
     if track_a.audio_hash and track_b.audio_hash and track_a.audio_hash == track_b.audio_hash:
-        report.is_exact_audio = True
-        report.duration_diff = abs(track_a.duration - track_b.duration)
-        report.confidence = 100.0
-        report.classification = DuplicateType.EXACT_AUDIO
-        report.reasons.append("Duplicado de Audio Exacto: Misma señal PCM decodificada (diferente contenedor o etiquetas ID3).")
-        return report
+        duration_diff = abs(track_a.duration - track_b.duration)
+        report.duration_diff = duration_diff
+
+        # EXACT_AUDIO requires:
+        # - Matching 30s prefix audio_hash
+        # - Compatible duration (difference <= 0.5s)
+        # - Full normalized PCM stream verification
+        if duration_diff <= 0.5:
+            from core.fingerprint import verify_full_normalized_pcm_match
+            if verify_full_normalized_pcm_match(track_a.filepath, track_b.filepath):
+                report.is_exact_audio = True
+                report.confidence = 100.0
+                report.classification = DuplicateType.EXACT_AUDIO
+                report.reasons.append("Duplicado de Audio Exacto: Misma señal PCM normalizada completa decodificada.")
+                return report
+            else:
+                report.reasons.append("Prefijo de audio idéntico (30s), pero la señal PCM completa difiere (no es duplicado exacto).")
+        else:
+            report.reasons.append(f"Prefijo de audio idéntico (30s), pero variación de duración incompatible ({duration_diff:.2f}s > 0.5s).")
 
     # 3. Duration Pre-filtering
     duration_diff = abs(track_a.duration - track_b.duration)
