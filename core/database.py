@@ -253,6 +253,11 @@ class Database:
         with self._get_connection() as conn:
             conn.execute("DELETE FROM tracks WHERE filepath = ?", (filepath,))
 
+    def get_track(self, filepath: str) -> Optional[AudioTrack]:
+        """Fetches a single track by filepath."""
+        tracks = self.get_tracks_for_files([filepath])
+        return tracks[0] if tracks else None
+
     def get_tracks_for_files(self, filepaths: List[str]) -> List[AudioTrack]:
         """Fetches tracks for given filepaths list."""
         if not filepaths:

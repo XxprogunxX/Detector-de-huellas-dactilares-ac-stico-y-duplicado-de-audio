@@ -187,6 +187,16 @@ Acción Segura del Usuario (Mover a Respaldo / Eliminar con Confirmación)
 - Priorizar el traslado a carpetas de respaldo antes que la eliminación permanente.
 - Validar rutas contra ataques de *path traversal* o cadenas vacías.
 
+### `gui/components/bottom_player.py` & `gui/components/audio_player.py`
+- **Barra de Preescucha de Alto Contraste:** Estilo deck moderno con controles circulares de transporte ($\pm 10\text{s}$, botón central circular en cian brillante `#00E5FF`).
+- **Waveform Interactivo con Scrubbing Libre:** Visualizador de barras estilo ecualizador donde el progreso transcurrido brilla en cian y el restante se atenúa en pizarra oscuro. Permite **hacer clic o arrastrar con el ratón** en cualquier punto de la barra para saltar (*seek/scrubbing*) instantáneamente a ese segundo exacto de la canción.
+- **Ficha Técnica en Vivo:** Extracción automática de formato, bitrate, frecuencia de muestreo y canales (`FLAC | 24-bit | 96 kHz | Stereo` o `MP3 | 320 kbps | 44.1 kHz | Stereo`).
+- **Sincronización Realtime:** `AudioPlayer` emite señales de posición a 100 ms para actualizar simultáneamente el reloj actual (`01:42`), duración total (`06:23`) y las barras del waveform sin interrupciones.
+
+### `gui/app.py` & Persistencia de Sesión
+- **Persistencia Segura de Sesión (`last_session.json`):** Almacena la última carpeta activa y los grupos de duplicados detectados. Al arrancar la aplicación, `set_active_folder` se ejecuta con `save_session=False` para impedir sobreescrituras accidentales con listas vacías.
+- **Reconstrucción Instantánea desde Caché SQLite (Zero Re-scan):** Si el archivo de sesión no existiera pero la base de datos `music_fingerprints.db` contiene pistas indexadas para la carpeta seleccionada, la aplicación carga los tracks y huellas de SQLite y ejecuta `cluster_duplicates` directamente en memoria en $<1\text{ segundo}$, restaurando todos los grupos de duplicados sin necesidad de volver a escanear ni re-analizar los miles de archivos del disco.
+
 ---
 
 ## 7. GUI y Componentes Visuales (PyQt6)
@@ -200,7 +210,7 @@ Acción Segura del Usuario (Mover a Respaldo / Eliminar con Confirmación)
   - `QualityView`: Auditoría de calidad y salud espectral.
   - `SettingsView`: Preferencias de motor y base de datos.
   - `ABComparisonDialog`: Comparador auditivo A/B instantáneo.
-  - `BottomPlayerBar`: Reproductor global con Pygame.
+  - `BottomPlayerBar`: Reproductor global interactivo con waveform scrubbing.
   - `DeleteModal`: Diálogo de seguridad con protección de borrado.
 
 ---

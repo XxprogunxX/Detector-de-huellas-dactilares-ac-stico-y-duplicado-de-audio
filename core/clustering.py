@@ -98,18 +98,28 @@ def cluster_duplicates(
             
     for group in hash_groups.values():
         if len(group) > 1:
-            first = group[0].filepath
-            for other in group[1:]:
-                ds.union(first, other.filepath)
-                if (first, other.filepath) not in pair_results:
-                    pair_results[(first, other.filepath)] = EvidenceReport(
-                        track_a_path=first,
-                        track_b_path=other.filepath,
-                        classification=DuplicateType.EXACT_AUDIO,
-                        confidence=100.0,
-                        is_exact_audio=True,
-                        reasons=["Duplicado de Audio Exacto: Misma señal PCM decodificada (diferente contenedor o etiquetas ID3)."]
-                    )
+            from core.fingerprint import verify_full_normalized_pcm_match
+            for i in range(len(group)):
+                for j in range(i + 1, len(group)):
+                    track_a = group[i]
+                    track_b = group[j]
+                    dur_diff = abs(track_a.duration - track_b.duration)
+                    # EXACT_AUDIO requires:
+                    # 1. Matching 30s prefix audio_hash
+                    # 2. Duration variance <= 0.5s
+                    # 3. Full normalized PCM stream verification
+                    if dur_diff <= 0.5 and verify_full_normalized_pcm_match(track_a.filepath, track_b.filepath):
+                        ds.union(track_a.filepath, track_b.filepath)
+                        if (track_a.filepath, track_b.filepath) not in pair_results:
+                            pair_results[(track_a.filepath, track_b.filepath)] = EvidenceReport(
+                                track_a_path=track_a.filepath,
+                                track_b_path=track_b.filepath,
+                                classification=DuplicateType.EXACT_AUDIO,
+                                confidence=100.0,
+                                is_exact_audio=True,
+                                duration_diff=dur_diff,
+                                reasons=["Duplicado de Audio Exacto: Misma señal PCM normalizada completa decodificada."]
+                            )
 
     # Step 2: High-Precision Subfingerprint Index with Duration Bucketing
     if progress_callback:
