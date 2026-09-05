@@ -14,6 +14,46 @@ from core.fingerprint import compress_fingerprint, decompress_fingerprint
 DEFAULT_DB_NAME = "music_fingerprints.db"
 
 
+def normalize_path_safe(path: str) -> str:
+    """
+    Normalizes a filesystem path safely for cross-platform comparison.
+    Uses normcase and normpath without resolving symlinks destructively.
+    """
+    if not path:
+        return ""
+    return os.path.normcase(os.path.abspath(os.path.normpath(path)))
+
+
+def make_safe_directory_like_pattern(dir_prefix: str, escape_char: str = "^") -> tuple[str, str]:
+    """
+    Constructs a secure SQL LIKE pattern for prefix directory queries that:
+    1. Normalizes backslashes to forward slashes (preserving leading // for UNC paths).
+    2. Strips redundant trailing slashes, then enforces a trailing slash so that
+       'C:/Music' never matches 'C:/Music2' or 'C:/Music_Backup'.
+    3. Escapes special SQL wildcard characters (%, _) and the escape character itself.
+    4. Appends the SQL '%' wildcard at the end.
+
+    Returns:
+      (safe_pattern, escape_char)
+    """
+    if not dir_prefix:
+        return ("%", escape_char)
+
+    clean = dir_prefix.replace("\\", "/")
+    is_unc = clean.startswith("//")
+    clean_stripped = clean.rstrip("/")
+    if not clean_stripped:
+        clean_dir = "//" if is_unc else "/"
+    else:
+        clean_dir = clean_stripped + "/"
+
+    escaped = clean_dir.replace(escape_char, escape_char + escape_char)
+    escaped = escaped.replace("%", escape_char + "%")
+    escaped = escaped.replace("_", escape_char + "_")
+
+    return (escaped + "%", escape_char)
+
+
 def get_default_db_path() -> str:
     """Returns safe database location in user's AppData or project directory."""
     if os.name == "nt":
@@ -34,8 +74,8 @@ class Database:
         else:
             self.db_path = db_path
 
-        # Persistent connection reused across all operations (thread-safe via lock)
-        self._lock = threading.Lock()
+        # Persistent connection reused across all operations (thread-safe via re-entrant lock)
+        self._lock = threading.RLock()
         self._conn: Optional[sqlite3.Connection] = None
         self._open_connection()
         self.init_db()
@@ -67,11 +107,20 @@ class Database:
                 self._conn.rollback()
                 raise
 
+    @property
+    def is_closed(self) -> bool:
+        """Returns True if the persistent connection is closed or not opened."""
+        with self._lock:
+            return self._conn is None
+
     def close(self):
         """Closes the persistent connection (call on app exit)."""
         with self._lock:
             if self._conn:
-                self._conn.close()
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
                 self._conn = None
 
     def __enter__(self):
@@ -300,13 +349,26 @@ class Database:
             conn.execute("DELETE FROM sqlite_sequence WHERE name='tracks';")
         self.vacuum_database()
 
-    def vacuum_database(self):
-        """Runs SQLite VACUUM to reclaim disk space."""
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
-        try:
-            conn.execute("VACUUM;")
-        finally:
-            conn.close()
+    def vacuum_database(self) -> bool:
+        """
+        Runs SQLite VACUUM to reclaim disk space safely without breaking
+        transactions, connections, or WAL mode.
+        """
+        with self._lock:
+            if self._conn is None:
+                return False
+            # SQLite prohibits running VACUUM inside an active transaction
+            if getattr(self._conn, "in_transaction", False):
+                import logging
+                logging.getLogger(__name__).warning("Cannot run VACUUM inside an active transaction.")
+                return False
+            try:
+                self._conn.execute("VACUUM;")
+                return True
+            except sqlite3.OperationalError as e:
+                import logging
+                logging.getLogger(__name__).warning("SQLite VACUUM failed safely: %s", e)
+                return False
 
     def get_all_tracks(self, dir_prefix: Optional[str] = None, include_fingerprints: bool = False) -> List[AudioTrack]:
         """Returns all tracks, optionally filtered by directory prefix. Fingerprint decompression is skipped by default for speed."""
@@ -322,9 +384,9 @@ class Database:
             )
             params = ()
             if dir_prefix:
-                clean_pref = dir_prefix.replace("\\", "/").rstrip("/") + "%"
-                query += " WHERE REPLACE(filepath, char(92), char(47)) LIKE ?"
-                params = (clean_pref,)
+                pattern, esc = make_safe_directory_like_pattern(dir_prefix)
+                query += f" WHERE REPLACE(filepath, char(92), char(47)) LIKE ? ESCAPE '{esc}'"
+                params = (pattern,)
             cursor.execute(query, params)
             for row in cursor.fetchall():
                 res.append(self._row_to_track(row, decompress_fp=include_fingerprints))
@@ -338,9 +400,9 @@ class Database:
             query = "SELECT format, COUNT(*), SUM(filesize) FROM tracks"
             params = ()
             if dir_prefix:
-                clean_pref = dir_prefix.replace("\\", "/").rstrip("/") + "%"
-                query += " WHERE REPLACE(filepath, char(92), char(47)) LIKE ?"
-                params = (clean_pref,)
+                pattern, esc = make_safe_directory_like_pattern(dir_prefix)
+                query += f" WHERE REPLACE(filepath, char(92), char(47)) LIKE ? ESCAPE '{esc}'"
+                params = (pattern,)
             query += " GROUP BY format"
             cursor.execute(query, params)
             for row in cursor.fetchall():

@@ -13,7 +13,7 @@ from datetime import datetime
 from enum import Enum
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Callable, Dict, Any
-from core.models import DuplicateGroup, AudioTrack, FileAction
+from core.models import DuplicateGroup, AudioTrack, FileAction, prune_duplicate_groups
 from core.database import Database
 
 
@@ -521,6 +521,11 @@ class FileOperationService:
                             success += 1
 
             group.recalculate_space_saving()
+
+        # Prune zombie duplicate groups (groups with <= 1 tracks remaining)
+        pruned_groups = prune_duplicate_groups(groups)
+        groups.clear()
+        groups.extend(pruned_groups)
 
         # Determinar estado global con precedencia estricta
         if partial_failures > 0:

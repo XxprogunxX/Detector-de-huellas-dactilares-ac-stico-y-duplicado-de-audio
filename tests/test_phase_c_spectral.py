@@ -274,6 +274,19 @@ class TestSampleRateAndNyquist(unittest.TestCase):
         self.assertEqual(res.assessment, SpectralAssessment.UNKNOWN)
         self.assertEqual(res.reason, "insufficient_frequency_bandwidth")
 
+    def test_32khz_native_audio_is_not_false_transcode(self):
+        """26b. 32000 Hz audio has Nyquist 16 kHz; it must NOT be suspected as transcode just because spectrum ends at 16 kHz."""
+        sr = 32000
+        # Broadband noise that naturally fills the entire 32 kHz spectrum up to its 16 kHz Nyquist
+        np.random.seed(42)
+        samples = np.random.uniform(-0.3, 0.3, sr * 4).astype(np.float32)
+        res = analyze_pcm_samples(samples, sample_rate=sr, channels=1, analyzed_duration=4.0)
+
+        # Must return UNKNOWN with insufficient_frequency_bandwidth and NEVER SUSPECTED_TRANSCODE
+        self.assertEqual(res.assessment, SpectralAssessment.UNKNOWN)
+        self.assertEqual(res.reason, "insufficient_frequency_bandwidth")
+        self.assertNotEqual(res.assessment, SpectralAssessment.SUSPECTED_TRANSCODE)
+
     def test_high_sample_rate_analysis_preserves_relevant_band(self):
         """27. High sample rate (96000 Hz) evaluates the target audio band properly."""
         sr = 96000

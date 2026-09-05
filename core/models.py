@@ -229,6 +229,48 @@ class DuplicateGroup:
         )
 
 
+def prune_duplicate_groups(groups: List[DuplicateGroup]) -> List[DuplicateGroup]:
+    """
+    Prunes zombie duplicate groups where len(group.tracks) <= 1:
+    1. A group with <= 1 tracks is no longer a duplicate group.
+       - It is pruned from the returned list.
+       - Any surviving track has any obsolete DELETE action cleared (reset to FileAction.KEEP).
+       - Space saving is reset to 0 so it contributes no fake savings.
+    2. For surviving groups (len(group.tracks) > 1):
+       - If best_track_path is still present in group.tracks, it is preserved.
+       - If best_track_path was deleted or is not in group.tracks, it is recalculated
+         safely based on the track with the highest quality score.
+       - If group.requires_manual_review is True:
+         Do NOT assign FileAction.DELETE to remaining tracks! Tracks must remain KEEP or UNSET.
+       - group.recalculate_space_saving() is called.
+    """
+    surviving_groups: List[DuplicateGroup] = []
+    for g in groups:
+        if len(g.tracks) <= 1:
+            g.space_saving_bytes = 0
+            for t in g.tracks:
+                if t.action == FileAction.DELETE:
+                    t.action = FileAction.KEEP
+            continue
+
+        track_paths = {t.filepath for t in g.tracks}
+        if g.best_track_path not in track_paths:
+            best_t = max(g.tracks, key=lambda t: (t.quality_score, t.bitrate, t.filesize))
+            g.best_track_path = best_t.filepath
+            g.best_track_reason = f"Mejor calidad tras actualización ({best_t.quality_score:.0f} pts)"
+
+            if g.requires_manual_review:
+                for t in g.tracks:
+                    if t.action == FileAction.DELETE:
+                        t.action = FileAction.UNSET
+            else:
+                best_t.action = FileAction.KEEP
+
+        g.recalculate_space_saving()
+        surviving_groups.append(g)
+
+    return surviving_groups
+
 
 @dataclass
 class ScanStats:

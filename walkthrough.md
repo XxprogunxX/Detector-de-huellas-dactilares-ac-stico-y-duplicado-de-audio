@@ -15,49 +15,43 @@ El sistema ha sido validado empíricamente a través del `Benchmark V5` (170 par
 * **`EXACT_HASH` (100%):** Coincidencia criptográfica idéntica byte-por-byte (excluye recodificaciones).
 * **`EXACT_AUDIO` (Coincidencia PCM):** Cortocircuito de coincidencia exacta sobre el audio crudo decodificado, con `confidence = 100.0`. Atrapa transcodificaciones puras (sin modificaciones) ignorando por completo el contenedor o el padding introducido por formatos con pérdida.
 
-## Fase C: Evaluación Espectral Basada en Evidencia (AC-005, AC-017) — COMPLETADA
+## Fase D: Persistencia, SQLite Seguro y Consistencia de GUI — COMPLETADA
 
 ### Cambios Implementados:
-1. **Módulo de Tipos Desacoplado (`core/spectral_types.py`)**:
-   - `SpectralAssessment(str, Enum)`: `NO_LOSSY_EVIDENCE`, `SUSPECTED_TRANSCODE`, `UNKNOWN`, `NOT_ANALYZED`.
-   - `SpectralResult(dataclass(frozen=True))`: estructura inmutable, serializable (`to_dict` / `from_dict`), con validación de rango de `confidence` en `[0.0, 100.0]`.
-   - Cero dependencias circulares con `models.py`, GUI, FFmpeg o SQLite.
+1. **SQLite Seguro y Búsqueda Estricta de Rutas (`core/database.py`)**:
+   - `make_safe_directory_like_pattern`: normaliza separadores, garantiza slash final de directorio (evitando que `C:/Music` coincida con `C:/Music2` o `C:/Music_Backup`), escapa caracteres especiales `%` y `_`, y añade `ESCAPE '^'` explícito en SQL.
+   - Manejo transparente de rutas UNC (`//server/share/`).
+   - `normalize_path_safe`: normalización con `normcase` y `normpath` sin resolución destructiva de symlinks.
+   - `vacuum_database`: ejecución segura en conexión persistente WAL, rechazo si existe transacción activa, captura de locks sin romper la conexión y propiedad `is_closed`.
+   - `threading.RLock()` en `Database` para garantizar concurrencia re-entrante segura.
 
-2. **Modelo y Persistencia (`core/models.py`)**:
-   - `AudioTrack.spectral_assessment` tipado con fallback backward-compatible a `UNKNOWN` para sesiones legadas.
+2. **Persistencia Atómica de Sesiones (`core/session_manager.py`)**:
+   - `save_session_atomic`: flujo robusto `last_session.json.tmp` -> `flush()` -> `os.fsync()` -> backup `last_session.json.bak` -> `os.replace()`. Un fallo durante la escritura nunca destruye la sesión válida anterior.
+   - `load_session_safe`: lectura tolerante a fallos, fallback automático a `.bak` si el JSON está corrupto, inicio en blanco sin crasheos si ambos fallan, y preservación estricta de `requires_manual_review=True`.
+   - `clean_abandoned_tmp_sessions`: limpieza de archivos temporales huérfanos.
 
-3. **Motor Espectral Conservador (`core/quality_analyzer.py`)**:
-   - **Preservación Estéreo Sin Downmix**: Decodificación multi-canal. Cada canal es analizado de manera independiente. Si al menos un canal presenta contenido de alta frecuencia que contradice el cutoff lossy, NO se clasifica como `SUSPECTED_TRANSCODE`.
-   - **Muestreo Multi-Región Temporal**: Evaluación de 3 regiones independientes (inicio útil, central, final). Se descartan intros silenciosas o transitorias.
-   - **Respeto a Nyquist y Sample Rate Nativo**: Sin remuestreo forzado a 44100 Hz. Sample rates < 32000 Hz retornan `UNKNOWN` con razón `insufficient_frequency_bandwidth`.
-   - **Fail-Closed Estricto**: Archivos silenciosos (< -60 dBFS), cortos (< 3.0s), con menos de 16 ventanas válidas o con fallo de decodificación retornan `UNKNOWN`.
-   - **Thresholds Heurísticos Centralizados**:
-     - `PROVISIONAL_MIN_ENERGY_DBFS = -60.0`
-     - `PROVISIONAL_MIN_VALID_WINDOWS = 16`
-     - `PROVISIONAL_MIN_DURATION_SECONDS = 3.0`
-     - `PROVISIONAL_CUTOFF_ATTENUATION_DB = 40.0`
-     - `PROVISIONAL_PERSISTENCE_RATIO = 0.80`
-     - `PROVISIONAL_MIN_SAMPLE_RATE = 32000`
-   - **Puntuación de Calidad Prudente**: `NO_LOSSY_EVIDENCE`, `UNKNOWN` y `NOT_ANALYZED` reciben 0 bonus espectral en Fase C (bonus de +15 eliminado hasta calibración científica).
-   - **Wrapper Legado Fail-Closed (`estimate_spectral_cutoff`)**: Retorna `(0.0, 0.0)` en estados `UNKNOWN` y `NOT_ANALYZED`, impidiendo falsos positivos.
+3. **Poda de Grupos Zombi y Recálculo Seguro (`core/models.py`, `core/file_manager.py`)**:
+   - `prune_duplicate_groups`: grupos con $\le 1$ pista tras operaciones de eliminación/backup son purgados de la lista de duplicados.
+   - La pista superviviente permanece en la biblioteca SQLite intacta y se eliminan acciones `DELETE` obsoletas.
+   - Recálculo seguro de `best_track_path`: si la pista recomendada fue eliminada, se selecciona la de mayor calidad entre las supervivientes sin asignar acciones `DELETE` automáticas en grupos de revisión manual.
+   - Invocado in-place en `FileOperationService._execute_operation` y en las acciones de la GUI.
 
-4. **Worker y Pipeline (`core/scanner.py`)**:
-   - Eliminada cualquier invención de frecuencias de corte desde el bitrate.
-   - Gating estricto de FFT por bandera `spectral_analysis` y contenedor lossless (`is_lossless`). Archivos omitidos reciben `NOT_ANALYZED`.
-   - Preservación de contratos de mocks legados para backward compatibility.
-
-5. **Alineación de GUI**:
-   - `quality_view.py`, `duplicate_card.py`, `ab_comparison.py` actualizados para mostrar "Sin evidencia lossy detectada", "Posible transcodificación", "Resultado espectral no concluyente" y "Análisis espectral no realizado".
+4. **Ciclo de Vida y Cierre Limpio de la Aplicación (`gui/app.py`)**:
+   - Eliminado el manejador duplicado de `closeEvent`.
+   - Flujo ordenado: usuario cierra app -> scanner recibe cancelación cooperativa (`WorkerState.CANCELLING`) -> espera al hilo hasta 5000ms -> persistencia atómica de sesión -> cierre seguro de SQLite -> cierre de GUI.
+   - Conexión del botón "Ver Resultados de Duplicados" a `_on_nav_changed("Duplicados")` para navegar correctamente a la pestaña de duplicados sincronizando el sidebar.
+   - Expandir/contraer tarjetas con más de 4 pistas en `DuplicateGroupCard` sin ocultar permanentemente widgets ni alterar acciones.
+   - Auditoría de exportación CSV en `DeleteModal`: encoding UTF-8, columnas estructuradas y rutas obtenidas via `QStandardPaths` (sin hardcodear carpetas `Desktop` localizadas).
 
 ---
 
 ## Verificación y Pruebas
 
-- **Suite Fase C (`tests/test_phase_c_spectral.py`)**:
-  - **25 tests ejecutados — 25 PASS (0.44s)**.
+- **Suite Fase D (`tests/test_phase_d_persistence_gui.py`)**:
+  - **26 tests ejecutados — 26 PASS (14.94s)**.
 - **Suite Completa del Proyecto (`unittest discover -s tests`)**:
-  - **127 tests ejecutados — 127 PASS (26.83s)**.
-  - 102 tests previos (79 Fase A + 23 Fase B) + 25 tests nuevos de Fase C con 0 regresiones.
+  - **154 tests ejecutados — 154 PASS (41.01s)**.
+  - 79 (Fase A) + 23 (Fase B) + 26 (Fase C) + 26 (Fase D) = **154 tests PASS con 0 fallos y 0 regresiones**.
 
 * **`ACOUSTIC_DUPLICATE` (>= 95%):** Covers transcodificaciones de baja calidad, compresiones extremas, y reducciones de canal (Stereo a Mono).
 * **`POSSIBLE_DUPLICATE` (>= 80% y < 95%):** Reservado para casos donde el motor identifica una alta similitud pero existen variaciones acústicas reales (ej. remasterizaciones o adición de ecos superficiales).

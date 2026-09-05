@@ -44,7 +44,7 @@ class SpectralResult:
       confidence: Internal consistency of the evidence found, scaled from 0.0 to 100.0.
                   NOTE: This is NOT a statistical probability of a track being fake lossless.
       analyzed_duration: Usable audio duration analyzed in seconds.
-      valid_windows: Number of FFT windows with sufficient energy and valid data.
+      valid_windows: Sum of valid FFT windows across all analyzed channels.
       rms_dbfs: Measured root-mean-square energy level in dBFS across analyzed segments.
       reason: Machine-readable explanation for the assessment decision.
     """

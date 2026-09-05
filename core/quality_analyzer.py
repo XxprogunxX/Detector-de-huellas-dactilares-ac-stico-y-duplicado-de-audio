@@ -36,7 +36,8 @@ PROVISIONAL_MIN_VALID_WINDOWS: int = 16            # Minimum FFT windows with us
 PROVISIONAL_MIN_DURATION_SECONDS: float = 3.0      # Minimum audio duration needed to attempt evaluation
 PROVISIONAL_CUTOFF_ATTENUATION_DB: float = 40.0    # Drop below midrange peak required to suspect cutoff
 PROVISIONAL_PERSISTENCE_RATIO: float = 0.80        # Fraction of valid windows exhibiting cutoff (80%)
-PROVISIONAL_MIN_SAMPLE_RATE: int = 32000           # Sample rates below this cannot resolve 16-20kHz cutoff
+PROVISIONAL_MIN_SAMPLE_RATE: int = 40000           # Sample rates below 40kHz (e.g. 32kHz, 22.05kHz) lack Nyquist margin
+PROVISIONAL_MIN_NYQUIST_HZ: float = 20000.0        # Real Nyquist must be >= 20 kHz to reliably evaluate 15-20kHz lossy bands
 PROVISIONAL_FFT_SIZE: int = 2048                   # FFT analysis window size
 PROVISIONAL_HOP_SIZE: int = 1024                   # Hop size between windows
 
@@ -61,9 +62,9 @@ def analyze_pcm_samples(
     Core signal processing function: analyzes a 1D or 2D numpy array of float32 PCM samples.
     Evaluates individual channels without downmixing to prevent phase cancellation artifacts.
     """
-    # 1. Bandwidth check: Nyquist frequency must be sufficient
+    # 1. Bandwidth check: Real Nyquist frequency must provide sufficient margin
     nyquist = sample_rate / 2.0
-    if sample_rate < PROVISIONAL_MIN_SAMPLE_RATE:
+    if sample_rate < PROVISIONAL_MIN_SAMPLE_RATE or nyquist < PROVISIONAL_MIN_NYQUIST_HZ:
         return SpectralResult(
             assessment=SpectralAssessment.UNKNOWN,
             cutoff_hz=None,
@@ -364,8 +365,9 @@ def analyze_spectrum(
             channels = 2
             duration = 0.0
 
-    # 2. Check sample rate adequacy
-    if sample_rate < PROVISIONAL_MIN_SAMPLE_RATE:
+    # 2. Check sample rate and Nyquist adequacy
+    nyquist = sample_rate / 2.0
+    if sample_rate < PROVISIONAL_MIN_SAMPLE_RATE or nyquist < PROVISIONAL_MIN_NYQUIST_HZ:
         return SpectralResult(
             assessment=SpectralAssessment.UNKNOWN,
             cutoff_hz=None,
