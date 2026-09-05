@@ -335,16 +335,12 @@ class DeleteModal(QDialog):
         self.accept()
 
     # ── Public API ────────────────────────────────────────────────
-    def execute_action(self) -> tuple[int, int, list[str]]:
+    def execute_action(self):
         """
         Execute the selected deletion mode on marked files using centralized FileOperationService.
-        Returns (success_count, failed_count, log_lines).
+        Returns the full OperationResult object (which also supports tuple unpacking for backwards compatibility).
         """
-        from core.file_manager import FileOperationService
-
-        success = 0
-        failed = 0
-        logs: list[str] = []
+        from core.file_manager import FileOperationService, OperationResult, OperationStatus
 
         def _pre_hook(fp: str):
             try:
@@ -356,42 +352,85 @@ class DeleteModal(QDialog):
                 pass
 
         if self._selected_mode == "backup":
-            success, failed, logs = FileOperationService.backup(
+            result = FileOperationService.backup(
                 self.groups, self._backup_folder, db=self.db,
                 allow_manual_review_bypass=True,
                 pre_operation_hook=_pre_hook
             )
 
         elif self._selected_mode == "trash":
-            success, failed, logs = FileOperationService.trash(
+            result = FileOperationService.trash(
                 self.groups, db=self.db,
                 allow_manual_review_bypass=True,
                 pre_operation_hook=_pre_hook
             )
 
         elif self._selected_mode == "permanent":
-            success, failed, logs = FileOperationService.delete_permanently(
+            result = FileOperationService.delete_permanently(
                 self.groups, db=self.db,
                 allow_manual_review_bypass=True,
                 pre_operation_hook=_pre_hook
             )
+        else:
+            result = OperationResult(
+                success=0, failed=0, logs=["Modo desconocido"],
+                status=OperationStatus.FAILED, reason="UNKNOWN_MODE"
+            )
 
         if self._export_csv:
-            self._write_csv(logs)
+            self._write_csv(result)
 
-        return success, failed, logs
+        return result
 
-    def _write_csv(self, logs: list[str]):
+    def _get_export_csv_path(self) -> str:
+        from PyQt6.QtCore import QStandardPaths
+        desktop_dir = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DesktopLocation)
+        if desktop_dir and os.path.isdir(desktop_dir):
+            base_dir = desktop_dir
+        else:
+            docs_dir = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+            if docs_dir and os.path.isdir(docs_dir):
+                base_dir = docs_dir
+            else:
+                base_dir = os.path.expanduser("~")
+
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return os.path.join(base_dir, f"audio_cleaner_report_{ts}.csv")
+
+    def _write_csv(self, result_or_logs):
         try:
-            csv_path = os.path.join(
-                os.path.expanduser("~"), "Desktop", "audio_cleaner_report.csv"
-            )
+            from datetime import datetime
+            csv_path = self._get_export_csv_path()
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
             with open(csv_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(["Acción", "Archivo"])
-                for line in logs:
-                    tag = line[:5].strip("[] ")
-                    rest = line[6:] if len(line) > 6 else line
-                    writer.writerow([tag, rest])
-        except Exception:
-            pass
+                writer.writerow(["Timestamp", "Operación", "Archivo", "Estado", "Resultado", "Detalles"])
+
+                if hasattr(result_or_logs, "logs"):
+                    # OperationResult object
+                    status_str = result_or_logs.status.value if hasattr(result_or_logs.status, "value") else str(result_or_logs.status)
+                    reason_str = getattr(result_or_logs, "reason", "") or ""
+                    for line in result_or_logs.logs:
+                        writer.writerow([
+                            now_str,
+                            self._selected_mode,
+                            line,
+                            status_str,
+                            f"Éxito: {result_or_logs.success}, Fallos: {result_or_logs.failed}, Bloqueados: {result_or_logs.blocked}",
+                            reason_str
+                        ])
+                elif isinstance(result_or_logs, list):
+                    for line in result_or_logs:
+                        writer.writerow([
+                            now_str,
+                            self._selected_mode,
+                            line,
+                            "PROCESSED",
+                            "OK",
+                            ""
+                        ])
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("Error exportando reporte CSV: %s", e)

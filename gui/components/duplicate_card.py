@@ -118,21 +118,40 @@ class DuplicateGroupCard(QFrame):
         tracks_layout = QHBoxLayout()
         tracks_layout.setSpacing(10)
         
-        max_tracks_to_show = 4
-        tracks_to_render = self.group.tracks[:max_tracks_to_show]
-        
-        for track in tracks_to_render:
+        # Render all tracks, collapsing tracks > 4 by default
+        self._extra_track_widgets = []
+        for idx, track in enumerate(self.group.tracks):
             col = self._create_track_column(track, is_best=(track.filepath == self.group.best_track_path))
             tracks_layout.addWidget(col)
             self.track_rows.append(col)
-            
+            if idx >= 4:
+                col.hide()
+                self._extra_track_widgets.append(col)
+
         main_layout.addLayout(tracks_layout)
-            
-        remaining_tracks = len(self.group.tracks) - max_tracks_to_show
+
+        remaining_tracks = len(self.group.tracks) - 4
         if remaining_tracks > 0:
-            lbl_more = QLabel(f"+ {remaining_tracks} archivo(s) duplicado(s) adicional(es) en este grupo ocultos para mejorar el rendimiento...")
-            lbl_more.setObjectName("muted")
-            main_layout.addWidget(lbl_more)
+            self._is_expanded = False
+            self.btn_toggle_tracks = QPushButton(f"Mostrar {remaining_tracks} pistas más en este grupo...")
+            self.btn_toggle_tracks.setObjectName("ghost")
+            self.btn_toggle_tracks.setIcon(qta.icon("fa5s.chevron-down", color=COLORS["cyan"]))
+            self.btn_toggle_tracks.setFixedHeight(30)
+            self.btn_toggle_tracks.setCursor(Qt.CursorShape.PointingHandCursor)
+
+            def _toggle():
+                self._is_expanded = not self._is_expanded
+                for w in self._extra_track_widgets:
+                    w.setVisible(self._is_expanded)
+                if self._is_expanded:
+                    self.btn_toggle_tracks.setText("Mostrar menos pistas")
+                    self.btn_toggle_tracks.setIcon(qta.icon("fa5s.chevron-up", color=COLORS["cyan"]))
+                else:
+                    self.btn_toggle_tracks.setText(f"Mostrar {remaining_tracks} pistas más en este grupo...")
+                    self.btn_toggle_tracks.setIcon(qta.icon("fa5s.chevron-down", color=COLORS["cyan"]))
+
+            self.btn_toggle_tracks.clicked.connect(_toggle)
+            main_layout.addWidget(self.btn_toggle_tracks)
 
     def _get_badge_style(self, dtype: DuplicateType):
         if dtype == DuplicateType.EXACT_HASH:
@@ -179,10 +198,13 @@ class DuplicateGroupCard(QFrame):
             f"<b>Duración:</b> {track.formatted_duration}<br>"
             f"<b>Tamaño:</b> {track.formatted_size}"
         )
-        if track.fake_lossless_confidence > 50.0:
-            specs_text += f"<br><br><span style='color:{COLORS['warning']}'>⚠️ Transcodificación ({track.fake_lossless_confidence:.0f}%)</span>"
+        from core.spectral_types import SpectralAssessment
+        if track.spectral_assessment == SpectralAssessment.SUSPECTED_TRANSCODE or track.fake_lossless_confidence > 50.0:
+            specs_text += f"<br><br><span style='color:{COLORS['warning']}'>⚠️ Posible transcodificación ({track.fake_lossless_confidence:.0f}%)</span>"
+        elif track.spectral_assessment == SpectralAssessment.NO_LOSSY_EVIDENCE:
+            specs_text += f"<br><br><span style='color:{COLORS['success']}'>✓ Sin evidencia lossy detectada</span>"
         elif track.is_lossless:
-            specs_text += f"<br><br><span style='color:{COLORS['success']}'>✓ Lossless Auténtico</span>"
+            specs_text += f"<br><br><span style='color:{COLORS['success']}'>✓ Lossless ({track.format})</span>"
             
         lbl_specs = QLabel(specs_text)
         lbl_specs.setStyleSheet("border: none;")

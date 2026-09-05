@@ -5,6 +5,7 @@ Layout: Sidebar | Multi-View Stack (Biblioteca, Escaneo, Duplicados, Calidad, Co
 
 import os
 import sys
+import logging
 from typing import List, Optional
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -13,9 +14,11 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
-from core.models import DuplicateGroup, DuplicateType, ScanStats, FileAction
+from enum import Enum
+from core.models import DuplicateGroup, DuplicateType, ScanStats, FileAction, prune_duplicate_groups
 from core.scanner import AudioScanner
 from core.database import Database
+from core.session_manager import save_session_atomic, load_session_safe, clean_abandoned_tmp_sessions
 from core.file_manager import (
     auto_apply_recommendations,
     move_marked_duplicates,
@@ -38,6 +41,12 @@ from gui.styles import COLORS, GLOBAL_QSS
 import qtawesome as qta
 
 
+class WorkerState(str, Enum):
+    STOPPED = "STOPPED"
+    RUNNING = "RUNNING"
+    CANCELLING = "CANCELLING"
+
+
 class ScannerWorker(QThread):
     """Background thread for running the scan without blocking the GUI."""
     progress_updated = pyqtSignal(ScanStats)
@@ -47,13 +56,24 @@ class ScannerWorker(QThread):
         super().__init__()
         self.scanner = scanner
         self.folder = folder
+        self.state = WorkerState.STOPPED
+
+    def cancel(self):
+        """Cooperatively signals the scanner and worker to cancel."""
+        self.state = WorkerState.CANCELLING
+        self.scanner.stop()
 
     def run(self):
-        groups = self.scanner.scan_directory(
-            self.folder,
-            progress_callback=self.progress_updated.emit
-        )
-        self.scan_finished.emit(groups)
+        self.state = WorkerState.RUNNING
+        try:
+            groups = self.scanner.scan_directory(
+                self.folder,
+                progress_callback=self.progress_updated.emit
+            )
+            if self.state != WorkerState.CANCELLING:
+                self.scan_finished.emit(groups)
+        finally:
+            self.state = WorkerState.STOPPED
 
 
 class AudioDuplicateDetectorApp(QMainWindow):
@@ -65,12 +85,26 @@ class AudioDuplicateDetectorApp(QMainWindow):
         self.setMinimumSize(1024, 680)
 
         self.db = Database()
+        logger = logging.getLogger(__name__)
         try:
             from core.file_manager import FileOperationService
-            FileOperationService.reconcile_pending_operations(self.db)
-        except Exception:
-            pass
-        self.scanner = AudioScanner(db=self.db)
+            reconcile_logs = FileOperationService.reconcile_pending_operations(self.db)
+            if reconcile_logs:
+                logger.info("Reconciliación al arranque completada: %s", reconcile_logs)
+                unresolved = [l for l in reconcile_logs if "⚠️" in l or "pendiente" in l.lower()]
+                if unresolved:
+                    logger.warning("Operaciones sin reconciliar o volúmenes no accesibles: %s", unresolved)
+        except Exception as rec_err:
+            logger.error("Error crítico en reconciliación al inicio: %s", rec_err, exc_info=True)
+            QMessageBox.warning(
+                self,
+                "Advertencia de Reconciliación",
+                f"No se pudo sincronizar el estado previo de las operaciones:\n{rec_err}\n"
+                "Por seguridad, revise sus archivos antes de ejecutar nuevas operaciones."
+            )
+        from core.config import load_detection_config, save_detection_config, DetectionConfig
+        self.detection_config = load_detection_config()
+        self.scanner = AudioScanner(db=self.db, detection_config=self.detection_config)
         self.player = AudioPlayer.get_instance()
         self.worker = None
 
@@ -97,35 +131,24 @@ class AudioDuplicateDetectorApp(QMainWindow):
 
     def _save_current_session(self):
         try:
-            import json
             path = self._get_session_path()
-            data = {
-                "folder": self.current_folder,
-                "groups": [g.to_dict() for g in self.all_groups]
-            }
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+            save_session_atomic(path, self.current_folder, self.all_groups)
+        except Exception as e:
+            logging.getLogger(__name__).error("Error al guardar sesión atómicamente: %s", e)
 
     def _load_saved_session(self, initial_folder: Optional[str] = None):
-        import json
         saved_folder = ""
         saved_groups = []
         try:
             path = self._get_session_path()
-            if os.path.exists(path):
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    saved_folder = data.get("folder", "")
-                    raw_groups = data.get("groups", [])
-                    saved_groups = [DuplicateGroup.from_dict(g) for g in raw_groups if isinstance(g, dict)]
-        except Exception:
-            pass
+            saved_folder, saved_groups = load_session_safe(path)
+            clean_abandoned_tmp_sessions(os.path.dirname(path))
+        except Exception as e:
+            logging.getLogger(__name__).warning("Error al cargar sesión previa: %s", e)
 
         target_folder = initial_folder or saved_folder
         if saved_groups:
-            self.all_groups = saved_groups
+            self.all_groups = prune_duplicate_groups(saved_groups)
 
         if target_folder and os.path.exists(target_folder):
             self.set_active_folder(target_folder, save_session=False)
@@ -191,10 +214,10 @@ class AudioDuplicateDetectorApp(QMainWindow):
         self.scanner_view.start_scan_requested.connect(self._start_scan)
         self.scanner_view.pause_scan_requested.connect(self.scanner.pause)
         self.scanner_view.resume_scan_requested.connect(self.scanner.resume)
-        self.scanner_view.cancel_scan_requested.connect(self.scanner.stop)
+        self.scanner_view.cancel_scan_requested.connect(self._cancel_scan)
         self.scanner_view.folder_requested.connect(self._choose_folder)
         self.scanner_view.view_duplicates_requested.connect(
-            lambda: self.sidebar.set_active_section("Duplicados")
+            lambda: self._on_nav_changed("Duplicados")
         )
         self.stack.addWidget(self.scanner_view)
 
@@ -268,6 +291,7 @@ class AudioDuplicateDetectorApp(QMainWindow):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _on_nav_changed(self, section: str):
+        self.sidebar.set_active_section(section)
         if section == "Biblioteca":
             self.stack.setCurrentIndex(0)
             self.library_view.set_folder(self.current_folder)
@@ -302,10 +326,35 @@ class AudioDuplicateDetectorApp(QMainWindow):
             self.set_active_folder(folder)
 
     def _on_settings_saved(self, config: dict):
-        if "similarity_threshold" in config:
-            self.scanner.similarity_threshold = config["similarity_threshold"]
-        if "threads" in config:
-            self.scanner.max_workers = config["threads"]
+        from core.config import DetectionConfig, save_detection_config
+        current_cfg = getattr(self.scanner, "detection_config", DetectionConfig())
+        sim_val = config.get("similarity_threshold")
+        if sim_val is not None:
+            possible_thresh = (sim_val * 100.0) if sim_val <= 1.0 else float(sim_val)
+        else:
+            possible_thresh = current_cfg.possible_threshold
+
+        ac_thresh = current_cfg.acoustic_threshold
+        if possible_thresh >= ac_thresh:
+            ac_thresh = min(100.0, possible_thresh + 5.0)
+
+        min_dur = float(config.get("min_duration", current_cfg.min_duration))
+        threads = int(config.get("threads", current_cfg.max_workers or 4))
+        spec = bool(config.get("spectral_fft", current_cfg.spectral_analysis))
+
+        new_cfg = DetectionConfig(
+            acoustic_threshold=ac_thresh,
+            possible_threshold=possible_thresh,
+            review_threshold=current_cfg.review_threshold,
+            max_auto_duration_diff=current_cfg.max_auto_duration_diff,
+            min_duration=min_dur,
+            spectral_analysis=spec,
+            max_workers=threads,
+        )
+        self.detection_config = new_cfg
+        self.scanner.detection_config = new_cfg
+        self.scanner.max_workers = threads
+        save_detection_config(new_cfg)
 
     # ─────────────────────────────────────────────────────────────────────────
     #  Scanning
@@ -336,9 +385,15 @@ class AudioDuplicateDetectorApp(QMainWindow):
         self.worker.scan_finished.connect(self._on_scan_finished)
         self.worker.start()
 
+    def _cancel_scan(self):
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel()
+        else:
+            self.scanner.stop()
+
     def _on_scan_finished(self, groups: List[DuplicateGroup]):
-        self.all_groups = groups
-        self.scanner_view.finish_scanning_ui(len(groups))
+        self.all_groups = prune_duplicate_groups(groups)
+        self.scanner_view.finish_scanning_ui(len(self.all_groups))
         self._save_current_session()
 
         # Update all views data
@@ -348,16 +403,12 @@ class AudioDuplicateDetectorApp(QMainWindow):
         self.settings_view.refresh_db_stats()
 
         # Switch to Duplicados if duplicate groups were found
-        if groups:
+        if self.all_groups:
             self.sidebar.set_active_section("Duplicados")
             self.stack.setCurrentIndex(2)
             self._refresh_view()
         else:
             self._refresh_view()
-
-    def closeEvent(self, event):
-        self._save_current_session()
-        super().closeEvent(event)
 
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -559,8 +610,10 @@ class AudioDuplicateDetectorApp(QMainWindow):
         if failed:
             msg += f"\nErrores al mover: {failed}"
         QMessageBox.information(self, "Mover Completado", msg)
+        self.all_groups = prune_duplicate_groups(self.all_groups)
         self._save_current_session()
         self.library_view.reload_tracks()
+        self.quality_view.reload_tracks()
         self._refresh_view()
 
     def _handle_delete_duplicates(self):
@@ -577,28 +630,76 @@ class AudioDuplicateDetectorApp(QMainWindow):
 
         modal = DeleteModal(self.filtered_groups, db=self.db, parent=self)
         if modal.exec() == QDialog.DialogCode.Accepted:
-            success, failed, logs = modal.execute_action()
-            msg = f"Archivos procesados: {success}"
-            if failed:
-                msg += f"\nErrores: {failed}"
-            QMessageBox.information(self, "Acción completada", msg)
+            result = modal.execute_action()
+            from core.file_manager import OperationStatus
+
+            if result.status == OperationStatus.SUCCESS:
+                title = "Acción completada"
+                msg = f"Archivos procesados exitosamente: {result.success}"
+                QMessageBox.information(self, title, msg)
+            elif result.status == OperationStatus.PARTIAL_SUCCESS:
+                title = "Operación completada parcialmente"
+                msg = f"Archivos procesados: {result.success}\nOmitidos/Bloqueados por seguridad: {result.blocked}"
+                QMessageBox.warning(self, title, msg)
+            elif result.status == OperationStatus.PARTIAL_FAILURE:
+                title = "Fallo parcial en la operación"
+                msg = f"Archivos modificados en disco: {result.success}\nFallos parciales/sincronización: {result.partial_failures + result.failed}"
+                if result.reason:
+                    msg += f"\nMotivo: {result.reason}"
+                QMessageBox.warning(self, title, msg)
+            elif result.status == OperationStatus.BLOCKED:
+                title = "Operación bloqueada"
+                msg = f"La operación fue bloqueada por políticas de seguridad.\nArchivos protegidos: {result.blocked}"
+                if result.reason:
+                    msg += f"\nMotivo: {result.reason}"
+                QMessageBox.warning(self, title, msg)
+            else:  # FAILED
+                title = "Error en la operación"
+                msg = f"No se pudo completar la operación.\nErrores: {result.failed}"
+                if result.reason:
+                    msg += f"\nMotivo: {result.reason}"
+                QMessageBox.critical(self, title, msg)
+
+            self.all_groups = prune_duplicate_groups(self.all_groups)
             self._save_current_session()
             self.library_view.reload_tracks()
+            self.quality_view.reload_tracks()
             self._refresh_view()
 
     def closeEvent(self, event):
         """Properly clean up resources on window close."""
-        self._save_current_session()
-        # Stop any running scan
+        logger = logging.getLogger(__name__)
+        # 1. Stop any running scan cooperatively
         if self.worker and self.worker.isRunning():
-            self.scanner.stop()
-            self.worker.wait(2000)
-        # Close the persistent SQLite connection gracefully
+            logger.info("Cierre de aplicación: deteniendo escaneo cooperativamente...")
+            if hasattr(self.worker, "cancel"):
+                self.worker.cancel()
+            else:
+                self.scanner.stop()
+            # Wait cooperatively for worker thread to stop
+            stopped = self.worker.wait(5000)
+            if not stopped or self.worker.isRunning():
+                logger.warning(
+                    "El hilo del scanner no se detuvo dentro del tiempo límite de 5000ms. "
+                    "Abortando cierre para proteger la base de datos y la sesión."
+                )
+                if event is not None and hasattr(event, "ignore"):
+                    event.ignore()
+                return
+
+        # 2. Persist state safely via atomic session save
+        self._save_current_session()
+
+        # 3. Close the persistent SQLite connection gracefully after worker is completely stopped
         try:
             self.db.close()
-        except Exception:
+        except Exception as e:
+            logger.warning("Aviso cerrando base de datos SQLite en salida: %s", e)
+
+        try:
+            super().closeEvent(event)
+        except (TypeError, RuntimeError):
             pass
-        super().closeEvent(event)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

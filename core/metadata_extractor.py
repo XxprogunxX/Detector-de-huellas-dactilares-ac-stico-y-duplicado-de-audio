@@ -1,3 +1,4 @@
+from core.binary_resolver import get_ffprobe_path
 """
 Audio metadata extraction using Mutagen with FFprobe fallback.
 """

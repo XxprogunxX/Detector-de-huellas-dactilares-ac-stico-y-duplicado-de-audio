@@ -50,36 +50,8 @@ def _set_subprocess_low_priority(proc: subprocess.Popen):
         pass  # Non-fatal: if it fails, we just run at normal priority
 
 
-def get_fpcalc_path() -> str:
-    """Find local fpcalc binary or fallback to PATH, with support for PyInstaller bundles."""
-    # 1. Check PyInstaller temp directory (_MEIPASS)
-    if hasattr(sys, "_MEIPASS"):
-        meipass_bin = os.path.join(sys._MEIPASS, "bin", "fpcalc.exe" if sys.platform == "win32" else "fpcalc")
-        if os.path.isfile(meipass_bin):
-            return meipass_bin
-        meipass_root_bin = os.path.join(sys._MEIPASS, "fpcalc.exe" if sys.platform == "win32" else "fpcalc")
-        if os.path.isfile(meipass_root_bin):
-            return meipass_root_bin
-
-    # 2. Check directory where executable/script is located
-    exe_dir = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
-    candidates = [
-        os.path.join(exe_dir, "bin", "fpcalc.exe" if sys.platform == "win32" else "fpcalc"),
-        os.path.join(exe_dir, "fpcalc.exe" if sys.platform == "win32" else "fpcalc"),
-        os.path.join(os.path.dirname(exe_dir), "bin", "fpcalc.exe" if sys.platform == "win32" else "fpcalc"),
-        os.path.join(os.getcwd(), "bin", "fpcalc.exe" if sys.platform == "win32" else "fpcalc")
-    ]
-    for candidate in candidates:
-        if os.path.isfile(candidate):
-            return candidate
-
-    # 3. Check system PATH
-    import shutil
-    sys_fpcalc = shutil.which("fpcalc")
-    if sys_fpcalc:
-        return sys_fpcalc
-        
-    return candidates[0]
+from core.binary_resolver import get_fpcalc_path, get_ffmpeg_path, get_ffprobe_path
+from core.ffmpeg_runner import terminate_process_tree
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -141,8 +113,9 @@ def compute_audio_pcm_hash(filepath: str, sample_rate: int = 11025, max_seconds:
     y verificación en streaming del flujo PCM normalizado completo con verify_full_normalized_pcm_match.
     """
     try:
+        ffmpeg_bin = get_ffmpeg_path() or "ffmpeg"
         cmd = [
-            "ffmpeg", "-v", "quiet", "-nostdin",
+            ffmpeg_bin, "-v", "quiet", "-nostdin",
             "-i", filepath,
             "-t", str(max_seconds),   # only first 30s as fast pre-filter
             "-f", "s16le", "-ac", "1", "-ar", str(sample_rate),
@@ -179,13 +152,14 @@ class AudioStreamInfo:
     channels: int
     channel_layout: str
     sample_fmt: str
-    bit_depth: int
+    bit_depth: Optional[int]
     is_lossless: bool
 
 
 LOSSLESS_CODECS = {
     "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_s16be", "pcm_s24be", "pcm_s32be",
-    "pcm_u8", "pcm_f32le", "pcm_f64le", "flac", "alac", "wavpack", "ape", "tak", "shorten"
+    "pcm_s64le", "pcm_s64be", "pcm_u8", "pcm_f32le", "pcm_f64le", "flac", "alac",
+    "wavpack", "ape", "tak", "shorten"
 }
 
 
@@ -197,8 +171,9 @@ def get_audio_stream_info(filepath: str) -> Optional[AudioStreamInfo]:
     if not filepath or not os.path.isfile(filepath):
         return None
 
+    ffprobe_bin = get_ffprobe_path() or "ffprobe"
     cmd = [
-        "ffprobe", "-v", "quiet", "-print_format", "json",
+        ffprobe_bin, "-v", "quiet", "-print_format", "json",
         "-show_streams", "-select_streams", "a:0", filepath
     ]
     startupinfo = _get_low_priority_startupinfo() if sys.platform == "win32" else None
@@ -228,7 +203,23 @@ def get_audio_stream_info(filepath: str) -> Optional[AudioStreamInfo]:
         fmt = str(s.get("sample_fmt", "")).lower().strip()
 
         raw_bits = s.get("bits_per_raw_sample") or s.get("bits_per_sample")
-        bd = int(raw_bits) if raw_bits and str(raw_bits).isdigit() and int(raw_bits) > 0 else 16
+        bd: Optional[int] = None
+        if raw_bits and str(raw_bits).isdigit() and int(raw_bits) > 0:
+            bd = int(raw_bits)
+        else:
+            fmt_base = fmt.rstrip("p")
+            if fmt_base == "s16":
+                bd = 16
+            elif fmt_base == "s24":
+                bd = 24
+            elif fmt_base in ("s32", "flt"):
+                bd = 32
+            elif fmt_base in ("s64", "dbl"):
+                bd = 64
+            elif fmt_base == "u8":
+                bd = 8
+            else:
+                bd = None
 
         is_lossless = codec in LOSSLESS_CODECS or codec.startswith("pcm_")
 
@@ -249,7 +240,7 @@ def get_canonical_pcm_format(info_a: AudioStreamInfo, info_b: AudioStreamInfo) -
     """
     Deterministically selects canonical PCM format ONLY if both audio streams are compatible
     without losing information (no downmixing, no sample-rate alteration, matching bit depth).
-    Returns format string (e.g. 's16le', 's24le', 's32le') or None if incompatible.
+    Returns format string (e.g. 's16le', 's24le', 's32le', 's64le', 'f32le', 'f64le', 'u8') or None if incompatible.
     """
     # Reject mismatch in channel count or non-positive channels
     if info_a.channels <= 0 or info_b.channels <= 0 or info_a.channels != info_b.channels:
@@ -267,22 +258,57 @@ def get_canonical_pcm_format(info_a: AudioStreamInfo, info_b: AudioStreamInfo) -
     if info_a.is_lossless != info_b.is_lossless:
         return None
 
-    if info_a.is_lossless:
-        # Both are lossless: bit depths must match if specified
-        if info_a.bit_depth > 0 and info_b.bit_depth > 0 and info_a.bit_depth != info_b.bit_depth:
-            return None
-        max_bd = max(info_a.bit_depth, info_b.bit_depth)
-        if max_bd == 24:
-            return "s24le"
-        elif max_bd == 32:
-            return "s32le"
-        else:
-            return "s16le"
-    else:
-        # Both are lossy: codecs must be identical
+    # Require verifiable bit depth on both sides
+    if info_a.bit_depth is None or info_b.bit_depth is None:
+        return None
+    if info_a.bit_depth <= 0 or info_b.bit_depth <= 0:
+        return None
+
+    # Reject bit depth mismatch
+    if info_a.bit_depth != info_b.bit_depth:
+        return None
+
+    # If lossy, codecs must be identical
+    if not info_a.is_lossless:
         if info_a.codec_name != info_b.codec_name:
             return None
-        return "s16le"
+
+    fmt_a = (info_a.sample_fmt or "").lower().rstrip("p")
+    fmt_b = (info_b.sample_fmt or "").lower().rstrip("p")
+
+    # Define supported exact canonical mappings: (fmt_base, bit_depth) -> ffmpeg_format
+    supported_pairs = {
+        ("s16", 16): "s16le",
+        ("s32", 24): "s24le",
+        ("s24", 24): "s24le",
+        ("s32", 32): "s32le",
+        ("s64", 64): "s64le",
+        ("flt", 32): "f32le",
+        ("dbl", 64): "f64le",
+        ("u8", 8): "u8",
+    }
+
+    pair_a = (fmt_a, info_a.bit_depth)
+    pair_b = (fmt_b, info_b.bit_depth)
+
+    # If formats differ (e.g. float vs integer) reject immediately
+    if fmt_a != fmt_b:
+        # Special safe exception: s32/24 and s24/24 are both 24-bit PCM integer representations
+        if not ({fmt_a, fmt_b}.issubset({"s32", "s24"}) and info_a.bit_depth == 24):
+            return None
+
+    if pair_a not in supported_pairs:
+        return None
+    if pair_b not in supported_pairs:
+        return None
+
+    canonical_a = supported_pairs[pair_a]
+    canonical_b = supported_pairs[pair_b]
+
+    if canonical_a != canonical_b:
+        return None
+
+    return canonical_a
 
 
 def verify_full_normalized_pcm_match(
@@ -376,14 +402,7 @@ def verify_full_normalized_pcm_match(
     finally:
         for p in (proc_a, proc_b):
             if p is not None:
-                try:
-                    if p.stdout is not None:
-                        p.stdout.close()
-                    if p.poll() is None:
-                        p.kill()
-                    p.wait(timeout=1.0)
-                except Exception:
-                    pass
+                terminate_process_tree(p)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

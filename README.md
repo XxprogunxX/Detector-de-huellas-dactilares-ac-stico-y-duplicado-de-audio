@@ -4,10 +4,10 @@
 [![GUI](https://img.shields.io/badge/GUI-PyQt6-green?logo=qt&logoColor=white)](https://www.riverbankcomputing.com/software/pyqt/)
 [![Acoustic Engine](https://img.shields.io/badge/Engine-Chromaprint%20%2F%20fpcalc-orange)](https://acoustid.org/chromaprint)
 [![Database](https://img.shields.io/badge/Storage-SQLite%20WAL-blueviolet?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](#)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20Build%20Verified-brightgreen)](#)
 [![License](https://img.shields.io/badge/License-MIT-brightgreen.svg)](LICENSE)
 
-Una aplicación de escritorio moderna, robusta y de alto rendimiento en Python diseñada para analizar grandes colecciones de música (decenas o cientos de miles de canciones) y detectar duplicados exactos, copias acústicas y variantes musicales (remasters, radio edits, directos), utilizando **huellas acústicas locales (Chromaprint / fpcalc)**, **análisis espectral FFT** para detectar *Fake Lossless* y **hashes de audio PCM**, todo de forma 100% local y sin depender de servicios externos.
+Una aplicación de escritorio moderna, robusta y de alto rendimiento en Python diseñada para analizar grandes colecciones de música (decenas o cientos de miles de canciones) y detectar duplicados exactos, copias acústicas y variantes musicales (remasters, radio edits, directos), utilizando **huellas acústicas locales (Chromaprint / fpcalc)**, **análisis espectral FFT** para detectar *Fake Lossless* y **hashes de audio PCM canónico**, todo de forma 100% local y sin depender de servicios externos.
 
 ---
 
@@ -22,8 +22,9 @@ Una aplicación de escritorio moderna, robusta y de alto rendimiento en Python d
    - [Modo Consola / Headless (CLI)](#modo-consola--headless-cli)
 6. [Compilación a Ejecutable Autónomo (.exe)](#-compilación-a-ejecutable-autónomo-exe)
 7. [Suite de Pruebas Automatizadas](#-suite-de-pruebas-automatizadas)
-8. [Estructura del Proyecto](#-estructura-del-proyecto)
-9. [Licencia](#-licencia)
+8. [Benchmarks de Escalabilidad](#-benchmarks-de-escalabilidad)
+9. [Estructura del Proyecto](#-estructura-del-proyecto)
+10. [Licencia](#-licencia)
 
 ---
 
@@ -36,8 +37,8 @@ Una aplicación de escritorio moderna, robusta y de alto rendimiento en Python d
 
 ### 2. 🔍 Detección de Duplicados en 4 Niveles Jerárquicos
 - **Duplicados Exactos (100%)**:
-  - *Bit-a-bit en disco (`EXACT_HASH`)*: Coincidencia instantánea SHA-256 de archivos físicamente idénticos.
-  - *Flujo de audio PCM decodificado (`EXACT_AUDIO`)*: Cortocircuito exacto por hash de audio crudo decodificado, identificando canciones idénticas con distintos formatos (`.flac` vs `.wav` vs `.mp3`) o metadatos ID3 modificados.
+  - *Bit-a-bit en disco (`EXACT_HASH`)*: Coincidencia instantánea SHA-256 de archivos físicamente idénticos con verificación criptográfica previa a cualquier borrado destructivo.
+  - *Flujo de audio PCM decodificado (`EXACT_AUDIO`)*: Comparación PCM canónica estricta con preservación de información (mismo sample rate, canales, bits por muestra y channel layout) entre flujos lossless idénticos (ej. `.flac` vs `.wav`). Variaciones con compresión lossy (ej. MP3 vs FLAC) se delegan formalmente al comparador acústico Chromaprint.
 - **Duplicados Acústicos ($\ge 95\%$, `ACOUSTIC_DUPLICATE`)**:
   - Huellas acústicas Chromaprint (`fpcalc`) con comparación Hamming bitwise y ventana de alineamiento temporal dinámico de hasta **600 frames**.
   - Identifica la misma grabación original sin importar variaciones de formato (`MP3`, `FLAC`, `WAV`, `M4A`, `OGG`, `AAC`), tasa de bits (320 kbps vs 128 kbps), normalización de volumen o compresión.
@@ -68,10 +69,12 @@ Calcula automáticamente qué archivo es el mejor dentro de cada grupo de duplic
 - Integridad temporal y duración completa de la pista.
 - Asigna recomendaciones automáticas `[CONSERVAR]` / `[ELIMINAR]` con justificación técnica detallada y cálculo de ahorro de espacio en disco.
 
-### 6. ⚡ Rendimiento Extremo y Optimización Universal
-- **Prefiltro LSH de Alto Rendimiento**: Indexación por tokens de hash acústico sin dependencia de buckets de duración rígidos, con selectividad estricta (`min_hits = 3`) y escalabilidad comprobada en mega-clústeres (`max_bucket_size = 500`).
-- **Caché persistente SQLite con modo WAL (Write-Ahead Logging)**: Re-escaneo instantáneo de archivos inalterados en menos de $0.01\text{ ms}$.
-- **Procesamiento paralelo adaptativo**: Decodificación y extracción de huellas acústicas simultánea aprovechando todos los núcleos de CPU disponibles sin congelar el sistema operativo.
+### 6. ⚡ Rendimiento Extremo y Escalabilidad Bounded
+- **Candidate Generation Bounded en Streaming**: Generación de candidatos con tope estricto de memoria RAM durante la ingesta (evita la explosión combinatoria $O(N^2)$ en bibliotecas de más de 100,000 archivos).
+- **Prefiltro LSH de Alto Rendimiento**: Indexación por tokens de hash acústico con selectividad estricta (`min_hits = 3`) y límite de buckets sobredimensionados (`max_bucket_size = 500`).
+- **Caché Persistente SQLite con Invalidación Rápida**: Esquema con migración aditiva e idempotente (`mtime_ns`, `quick_signature` determinista de 12 KB). Re-escaneo de pistas inalteradas en $<0.01\text{ ms}$.
+- **FFmpeg Runner con Drenaje Concurrente**: Ejecución de FFmpeg/ffprobe con drenaje paralelo no bloqueante de `stdout` y `stderr`, previniendo bloqueos por contrapresión de pipes del sistema operativo, con timeout adaptativo y detección de stalls.
+- **Cancelación Cooperativa en Workers**: Apagado ordenado de pools de trabajo multiproceso (`ProcessPoolExecutor`) sin corromper la base de datos ni bloquear el cierre de la GUI.
 - **Diseñado para cualquier equipo**: Optimizado tanto para laptops con discos mecánicos HDD y CPUs modestas como para estaciones de trabajo con SSD NVMe.
 - **Control total del escáner**: Capacidad de Pausar, Reanudar y Cancelar el análisis en cualquier momento.
 
@@ -170,25 +173,29 @@ $$\text{Score} = w_{\text{fidelity}} + w_{\text{bitrate}} + w_{\text{samplerate}
 ## 🛠️ Instalación y Requisitos
 
 ### Requisitos del Sistema
-- **Sistema Operativo**: Windows 10 / 11, Linux o macOS.
-- **Python**: 3.10 o superior.
-- **FFmpeg**: Instalado y disponible en el `PATH` del sistema.
+- **Sistema Operativo**: Windows 10 / 11 (x86_64) — *Target probado y verificado: `Windows build verified`*. (Soporte Linux/macOS experimental dependiente de dependencias nativas del sistema).
+- **Python**: 3.10, 3.11, 3.12 o 3.13 (Probado exhaustivamente en CPython 3.13).
+- **FFmpeg & ffprobe**: Instalado y disponible en el `PATH` del sistema o en `bin/`.
 - **fpcalc**: Binario autónomo de Chromaprint (incluido en `bin/fpcalc.exe` para Windows).
 
 ### Instalación de Dependencias
 Clona el repositorio e instala las dependencias requeridas en tu entorno virtual:
 
 ```bash
-git clone https://github.com/XxprogunxX/Detector-de-huellas-dactilares-ac-stico-y-duplicado-de-audio.git
-cd Detector-de-huellas-dactilares-ac-stico-y-duplicado-de-audio
+git clone https://github.com/XxprogunxX/AUDIO-CLEANER.git
+cd AUDIO-CLEANER
 
 python -m venv venv
-# En Windows:
-venv\Scripts\activate
-# En Linux/macOS:
-source venv/bin/activate
+# En Windows (PowerShell):
+.\venv\Scripts\Activate.ps1
+# O en CMD:
+venv\Scripts\activate.bat
 
+# Instalación estándar:
 pip install -r requirements.txt
+
+# O instalación reproducible garantizada (Windows x64):
+pip install -r requirements-lock.txt
 ```
 
 ---
@@ -266,46 +273,73 @@ Este `.exe` es completamente autónomo y puede distribuirse en cualquier PC con 
 
 ## 🧪 Suite de Pruebas Automatizadas
 
-El proyecto cuenta con una suite exhaustiva de 32 pruebas unitarias e integración que valida de extremo a extremo la integridad matemática y funcional del sistema:
+El proyecto cuenta con una suite exhaustiva de **190 pruebas automatizadas** (0 errores, 0 fallos, 0 omitidos) que valida de extremo a extremo la integridad matemática, seguridad de borrado, concurrencia y persistencia:
 
 ```bash
-python -m unittest discover tests
+python -m unittest discover -s tests -p "test_*.py"
 ```
 
-### Escenarios cubiertos por las pruebas:
-- ✔️ Copias idénticas bit-a-bit en disco (`EXACT_HASH`).
-- ✔️ Mismo audio con diferentes etiquetas ID3, metadatos y contenedores (`EXACT_AUDIO`).
-- ✔️ Mismo audio convertido entre distintos formatos (`MP3`, `FLAC`, `WAV`, `OGG`, `M4A`).
-- ✔️ Mismo audio a diferentes tasas de bits ($320\text{ kbps}$ vs $128\text{ kbps}$) y canales (Stereo a Mono).
-- ✔️ Detección de Falsos Lossless (*Fake FLAC* inflado desde MP3 de $128\text{ kbps}$).
-- ✔️ Remasterizaciones y variaciones de ganancia/ecualización.
-- ✔️ Tolerancia a desalineación temporal y cortes de inicio (hasta 600 frames).
-- ✔️ Pistas con diferencias extremas de duración (Radio Edits y versiones extendidas).
-- ✔️ Mitigación de transitividad insegura (`has_weak_link`) y protección de borrado en clústeres heterogéneos.
-- ✔️ Escalabilidad del prefiltro LSH en mega-clústeres de 60+ duplicados idénticos.
-- ✔️ Operaciones atómicas de gestión de archivos (`FileManager`) e integridad ante errores de permisos.
-- ✔️ Verificación estricta de **cero falsos positivos** entre canciones distintas del mismo artista.
-- ✔️ Rendimiento, persistencia y atomicidad de la base de datos SQLite WAL.
+### Cobertura por Fases de Auditoría y Blindaje:
+- **Fase A — Seguridad Crítica & Anti Data-Loss (79 pruebas)**:
+  - Preservación estricta de PCM en `EXACT_AUDIO` (sin downmix mono, sin resampling forzado, rechazo por mismatch de canales, bit depth o layout).
+  - Protocolo `OperationJournal` transaccional en subdirectorio `.audioclean_journal/` con recuperación automática tras caída del proceso (*crash recovery*).
+  - Inmunidad fail-closed en clústeres mixtos con enlaces débiles (`has_weak_link` / `requires_manual_review = True`).
+- **Fase B — Configuración Centralizada (23 pruebas)**:
+  - Inmutabilidad de `DetectionConfig`, validación de jerarquía de umbrales, persistencia atómica en `settings.json` y fallback robusto ante corrupción.
+- **Fase C — Auditoría Espectral Basada en Evidencia (26 pruebas)**:
+  - Evaluación espectral multicanal conservadora (`SpectralAssessment`), detección de rolloff por canales independientes sin alteración de fase.
+  - Validación de Nyquist real para audios nativos a 32 kHz (prevención de falsos sospechosos de transcode).
+- **Fase D — Persistencia, SQLite Seguro y GUI (27 pruebas)**:
+  - Guardado atómico de sesiones con backup (`last_session.json` + `last_session.json.bak`).
+  - Timeout de cierre seguro en `ScannerWorker` (`wait(5000)`); aborta el cierre de ventana si el hilo sigue activo para no corromper SQLite.
+- **Fase E — Escalabilidad, Streaming Robusto y Packaging (35 pruebas)**:
+  - Runner FFmpeg con drenaje concurrente no bloqueante de `stdout` y `stderr` (prevención de deadlocks por contrapresión de pipes).
+  - Cancelación cooperativa de workers en `ProcessPoolExecutor`.
+  - Firma rápida de 12 KB (`quick_signature`) para invalidación de caché, con revalidación criptográfica SHA-256 obligatoria antes de acciones destructivas.
+  - Migración SQLite aditiva e idempotente (`PRAGMA table_info` y `ALTER TABLE` seguro preservando datos existentes).
+  - Generación bounded de candidatos durante la ingesta streaming con memoria acotada.
 
 ---
+
+## 📊 Benchmarks de Escalabilidad
+
+> [!NOTE]
+> **Etiquetado del Benchmark**: Esta prueba se define rigurosamente como `100k synthetic candidate-generation/clustering benchmark`. Mide la ingesta en memoria de huellas acústicas, indexación por shingles LSH, poda streaming bounded, clustering Union-Find Disjoint-Set y recall contra Ground Truth conocido. No representa un escaneo físico de 100,000 archivos reales en disco con decodificación completa de FFmpeg.
+
+### Métricas Observadas y Medidas:
+- **Herramienta de Medición**: `psutil` monitoreando en tiempo real el Process Tree completo (Proceso Principal + Workers hijos concurrentes).
+- **Entorno**: Windows 11 x64, Intel Core i7 / AMD Ryzen, CPython 3.13.7.
+
+| Muestra | Escenario | Tiempo (s) | Peak RSS (Main + Workers) | Candidatos Retenidos | Comparaciones Realizadas | ¿Aproximado / Podado? | Candidate Recall (Ground Truth) | Precisión |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **1,000** | B (Disperso realista) | **1.41 s** | 191.0 MB | 556 | 556 | No (`False`) | **100.0%** | 100.0% |
+| **1,000** | D (Adversarial, alta colisión) | **36.62 s** | 243.1 MB | 124,750 | 124,750 | Sí (`True`, 11 buckets) | N/A | N/A |
+| **100,000** | B (Disperso realista, 5% clústeres) | **97.53 s** | 2,584.6 MB | 55,110 | 55,110 | No (`False`) | **100.0%** | 100.0% |
 
 ## 📂 Estructura del Proyecto
 
 ```
 Detector-de-huellas-dactilares-ac-stico-y-duplicado-de-audio/
+├── benchmarks/
+│   └── benchmark_scalability.py # 100k synthetic candidate-generation/clustering benchmark
 ├── bin/
 │   └── fpcalc.exe              # Binario Chromaprint de alta velocidad
 ├── core/
 │   ├── __init__.py
 │   ├── models.py               # Modelos de datos (AudioTrack, DuplicateGroup, EvidenceReport)
-│   ├── fingerprint.py          # Extracción Chromaprint, hashes PCM y serialización
+│   ├── config.py               # Configuración centralizada inmutable (DetectionConfig)
+│   ├── spectral_types.py       # Tipos desacoplados SpectralAssessment y SpectralResult
+│   ├── binary_resolver.py      # Localizador universal de binarios (sys._MEIPASS, bin/, PATH)
+│   ├── ffmpeg_runner.py        # Runner con drenaje concurrente stdout/stderr y kill de process tree
+│   ├── cache_signature.py      # Firma rápida 12 KB (quick_signature) y revalidación SHA-256
+│   ├── fingerprint.py          # Extracción Chromaprint, hashes PCM canónicos y serialización
 │   ├── metadata_extractor.py   # Extracción de metadatos con Mutagen
 │   ├── quality_analyzer.py     # Análisis espectral FFT, Fake Lossless y scoring 0-100
 │   ├── comparator.py           # Alineamiento temporal, Hamming y ventana de offset
-│   ├── clustering.py           # Prefiltro LSH, Union-Find y mitigación has_weak_link
-│   ├── database.py             # Motor de persistencia SQLite con modo WAL
+│   ├── clustering.py           # Prefiltro LSH, streaming bounded y mitigación has_weak_link
+│   ├── database.py             # Motor de persistencia SQLite WAL con migración de esquema
 │   ├── scanner.py              # Orquestador recursivo de escaneo multiproceso
-│   └── file_manager.py         # Operaciones seguras en disco y protección contra borrado
+│   └── file_manager.py         # Operaciones seguras en disco, OperationJournal y recuperación
 ├── gui/
 │   ├── __init__.py
 │   ├── app.py                  # Ventana principal moderna en PyQt6 y orquestador GUI
@@ -336,13 +370,19 @@ Detector-de-huellas-dactilares-ac-stico-y-duplicado-de-audio/
 │   ├── test_file_manager.py    # Pruebas de seguridad de operaciones en disco y permisos
 │   ├── test_framework.py       # Pruebas del marco de evaluación adversarial
 │   ├── test_performance.py     # Pruebas de rendimiento y estrés
-│   └── test_quality.py         # Pruebas de detección de falsos lossless y FFT
+│   ├── test_quality.py         # Pruebas de detección de falsos lossless y FFT
+│   ├── test_phase_a_safety.py  # 79 pruebas de seguridad crítica y prevención de pérdida de datos
+│   ├── test_phase_b_config.py  # 23 pruebas de configuración centralizada y settings
+│   ├── test_phase_c_spectral.py # 26 pruebas de evaluación espectral multicanal
+│   ├── test_phase_d_persistence_gui.py # 27 pruebas de persistencia SQLite y consistencia GUI
+│   └── test_phase_e_scalability.py # 35 pruebas de streaming bounded, workers y empaquetado
 ├── app_icon.ico                # Icono de la aplicación en formato ICO
 ├── app_icon.png                # Icono de la aplicación en formato PNG
 ├── build_exe.bat               # Script automatizado para compilar el .exe con PyInstaller
 ├── build_installer.spec        # Especificación técnica de empaquetado de PyInstaller
 ├── main.py                     # Punto de entrada principal (CLI / GUI)
 ├── requirements.txt            # Dependencias del proyecto
+├── requirements-lock.txt       # Lockfile reproducible verificado para Windows x64
 ├── walkthrough.md              # Documento técnico consolidado de auditorías y benchmarks
 └── README.md                   # Documentación técnica completa
 ```

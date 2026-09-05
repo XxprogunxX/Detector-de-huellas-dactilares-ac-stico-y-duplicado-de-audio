@@ -8,6 +8,9 @@ from typing import List, Optional, Dict, Any
 import os
 
 
+from core.spectral_types import SpectralAssessment, SpectralResult
+
+
 class DuplicateType(str, Enum):
     EXACT_HASH = "EXACT_HASH"                # 100% Bit-for-bit identical file hash
     EXACT_AUDIO = "EXACT_AUDIO"              # 100% Identical decoded PCM audio stream
@@ -29,6 +32,8 @@ class AudioTrack:
     filepath: str
     filesize: int = 0
     mtime: float = 0.0
+    mtime_ns: int = 0
+    quick_signature: str = ""
     sha256: str = ""
     audio_hash: str = ""
     duration: float = 0.0
@@ -40,6 +45,7 @@ class AudioTrack:
     is_lossless: bool = False
     spectral_cutoff: float = 0.0  # in Hz
     fake_lossless_confidence: float = 0.0  # 0.0 to 100.0%
+    spectral_assessment: SpectralAssessment = SpectralAssessment.UNKNOWN
     quality_score: float = 0.0
     quality_details: str = ""
     fingerprint_raw: List[int] = field(default_factory=list)
@@ -81,6 +87,8 @@ class AudioTrack:
             "filename": self.filename,
             "filesize": self.filesize,
             "mtime": self.mtime,
+            "mtime_ns": self.mtime_ns,
+            "quick_signature": self.quick_signature,
             "sha256": self.sha256,
             "audio_hash": self.audio_hash,
             "duration": self.duration,
@@ -92,6 +100,7 @@ class AudioTrack:
             "is_lossless": self.is_lossless,
             "spectral_cutoff": self.spectral_cutoff,
             "fake_lossless_confidence": self.fake_lossless_confidence,
+            "spectral_assessment": self.spectral_assessment.value if isinstance(self.spectral_assessment, SpectralAssessment) else str(self.spectral_assessment),
             "quality_score": self.quality_score,
             "quality_details": self.quality_details,
             "title": self.title,
@@ -109,11 +118,23 @@ class AudioTrack:
         except Exception:
             action = FileAction.UNSET
 
+        raw_assess = data.get("spectral_assessment")
+        if raw_assess:
+            try:
+                spectral_assessment = SpectralAssessment(raw_assess)
+            except Exception:
+                spectral_assessment = SpectralAssessment.UNKNOWN
+        else:
+            # Historical session fallback: if not present in saved session, default to UNKNOWN
+            spectral_assessment = SpectralAssessment.UNKNOWN
+
         return cls(
             id=data.get("id"),
             filepath=data.get("filepath", ""),
             filesize=data.get("filesize", 0),
             mtime=data.get("mtime", 0.0),
+            mtime_ns=data.get("mtime_ns", int(data.get("mtime", 0.0) * 1_000_000_000)),
+            quick_signature=data.get("quick_signature", ""),
             sha256=data.get("sha256", ""),
             audio_hash=data.get("audio_hash", ""),
             duration=data.get("duration", 0.0),
@@ -125,6 +146,7 @@ class AudioTrack:
             is_lossless=bool(data.get("is_lossless", False)),
             spectral_cutoff=data.get("spectral_cutoff", 0.0),
             fake_lossless_confidence=float(data.get("fake_lossless_confidence", 0.0)),
+            spectral_assessment=spectral_assessment,
             quality_score=data.get("quality_score", 0.0),
             quality_details=data.get("quality_details", ""),
             fingerprint_raw=data.get("fingerprint_raw", []),
@@ -171,19 +193,7 @@ class DuplicateGroup:
         if len(self.tracks) <= 1:
             self.space_saving_bytes = 0
             return 0
-        del_bytes = sum(t.filesize for t in self.tracks if t.action == FileAction.DELETE)
-        if del_bytes > 0:
-            self.space_saving_bytes = del_bytes
-            return self.space_saving_bytes
-
-        total_bytes = sum(t.filesize for t in self.tracks)
-        keep_tracks = [t for t in self.tracks if t.action == FileAction.KEEP]
-        if keep_tracks:
-            kept_bytes = sum(t.filesize for t in keep_tracks)
-        else:
-            best = next((t for t in self.tracks if t.filepath == self.best_track_path), self.tracks[0])
-            kept_bytes = best.filesize
-        self.space_saving_bytes = max(0, total_bytes - kept_bytes)
+        self.space_saving_bytes = sum(t.filesize for t in self.tracks if t.action == FileAction.DELETE)
         return self.space_saving_bytes
 
     def to_dict(self) -> Dict[str, Any]:
@@ -225,10 +235,72 @@ class DuplicateGroup:
         )
 
 
+def prune_duplicate_groups(groups: List[DuplicateGroup]) -> List[DuplicateGroup]:
+    """
+    Prunes zombie duplicate groups where len(group.tracks) <= 1:
+    1. A group with <= 1 tracks is no longer a duplicate group.
+       - It is pruned from the returned list.
+       - Any surviving track has any obsolete DELETE action cleared (reset to FileAction.KEEP).
+       - Space saving is reset to 0 so it contributes no fake savings.
+    2. For surviving groups (len(group.tracks) > 1):
+       - If best_track_path is still present in group.tracks, it is preserved.
+       - If best_track_path was deleted or is not in group.tracks, it is recalculated
+         safely based on the track with the highest quality score.
+       - If group.requires_manual_review is True:
+         Do NOT assign FileAction.DELETE to remaining tracks! Tracks must remain KEEP or UNSET.
+       - group.recalculate_space_saving() is called.
+    """
+    surviving_groups: List[DuplicateGroup] = []
+    for g in groups:
+        if len(g.tracks) <= 1:
+            g.space_saving_bytes = 0
+            for t in g.tracks:
+                if t.action == FileAction.DELETE:
+                    t.action = FileAction.KEEP
+            continue
+
+        track_paths = {t.filepath for t in g.tracks}
+        if g.best_track_path not in track_paths:
+            best_t = max(g.tracks, key=lambda t: (t.quality_score, t.bitrate, t.filesize))
+            g.best_track_path = best_t.filepath
+            g.best_track_reason = f"Mejor calidad tras actualización ({best_t.quality_score:.0f} pts)"
+
+            if g.requires_manual_review:
+                for t in g.tracks:
+                    if t.action == FileAction.DELETE:
+                        t.action = FileAction.UNSET
+            else:
+                best_t.action = FileAction.KEEP
+
+        g.recalculate_space_saving()
+        surviving_groups.append(g)
+
+    return surviving_groups
+
+
+@dataclass
+class ScanCoverageReport:
+    is_complete: bool = True
+    is_approximate: bool = False
+    candidate_pairs_generated: int = 0
+    candidate_pairs_retained: int = 0
+    candidate_pairs_dropped: int = 0
+    oversized_buckets: int = 0
+    worker_failures: int = 0
+    actual_comparisons: int = 0
+    scan_status: str = "SUCCESS"  # SUCCESS, CANCELLED, FAILED
+
 
 @dataclass
 class ScanStats:
     total_files_found: int = 0
+    is_complete: bool = True
+    is_approximate: bool = False
+    candidate_pairs_generated: int = 0
+    candidate_pairs_retained: int = 0
+    candidate_pairs_dropped: int = 0
+    oversized_buckets: int = 0
+    worker_failures: int = 0
     files_scanned: int = 0
     files_from_cache: int = 0
     files_failed: int = 0

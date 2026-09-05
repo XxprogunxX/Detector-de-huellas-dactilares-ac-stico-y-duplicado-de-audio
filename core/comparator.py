@@ -5,6 +5,7 @@ Acoustic Fingerprint Comparison and Alignment Engine.
 from typing import List, Tuple, Optional
 import numpy as np
 from core.models import AudioTrack, EvidenceReport, DuplicateType
+from core.config import DetectionConfig
 
 
 def popcount32(x: int) -> int:
@@ -93,11 +94,17 @@ def compare_raw_fingerprints(
     return max_similarity, best_offset
 
 
-def compare_tracks(track_a: AudioTrack, track_b: AudioTrack) -> EvidenceReport:
+def compare_tracks(
+    track_a: AudioTrack,
+    track_b: AudioTrack,
+    config: Optional[DetectionConfig] = None
+) -> EvidenceReport:
     """
     Compares two tracks across all detection tiers (File Hash, PCM Hash, Acoustic Fingerprint).
     Returns an EvidenceReport with multiple signals and explained confidence.
     """
+    config = config or DetectionConfig()
+
     report = EvidenceReport(
         track_a_path=track_a.filepath,
         track_b_path=track_b.filepath,
@@ -213,17 +220,17 @@ def compare_tracks(track_a: AudioTrack, track_b: AudioTrack) -> EvidenceReport:
         )
 
     # 6. Final Classification Rules
-    if final_confidence >= 95.0:
+    if final_confidence >= config.acoustic_threshold:
         report.classification = DuplicateType.ACOUSTIC_DUPLICATE
         report.reasons.append(f"Duplicado Acústico ({final_confidence:.1f}%): Misma grabación original.")
-    elif final_confidence >= 80.0:
+    elif final_confidence >= config.possible_threshold:
         report.classification = DuplicateType.POSSIBLE_DUPLICATE
         report.requires_manual_review = True
-        if duration_diff > 2.0:
+        if duration_diff > config.max_auto_duration_diff:
             report.reasons.append(f"Posible Duplicado ({final_confidence:.1f}%): Variación de duración (posible versión extendida/directo).")
         else:
             report.reasons.append(f"Posible Duplicado ({final_confidence:.1f}%): Variación acústica (posible remasterización o transcodificación).")
-    elif final_confidence >= 40.0:
+    elif final_confidence >= config.review_threshold:
         report.classification = DuplicateType.LOW_CONFIDENCE_REVIEW
         report.requires_manual_review = True
         report.reasons.append(f"Revisión requerida ({final_confidence:.1f}%): Coincidencia parcial o posible error de detección.")
@@ -232,15 +239,14 @@ def compare_tracks(track_a: AudioTrack, track_b: AudioTrack) -> EvidenceReport:
         report.reasons.append(f"Pistas diferentes ({final_confidence:.1f}%).")
 
     # 🛡️ Duration Firewall (AC-002): Regla de seguridad independiente del score.
-    # Una confianza alta no puede eludir una diferencia de duración estructural significativa (> 2.0s).
-    max_auto_duration_diff = 2.0
-    if duration_diff > max_auto_duration_diff:
+    # Una confianza alta no puede eludir una diferencia de duración estructural significativa (> max_auto_duration_diff).
+    if duration_diff > config.max_auto_duration_diff:
         if report.classification == DuplicateType.ACOUSTIC_DUPLICATE:
             report.classification = DuplicateType.POSSIBLE_DUPLICATE
             report.requires_manual_review = True
             report.reasons.append(
                 f"🛡️ Duration Firewall: Degradado de ACOUSTIC_DUPLICATE a POSSIBLE_DUPLICATE "
-                f"por diferencia de duración ({duration_diff:.2f}s > {max_auto_duration_diff:.2f}s). "
+                f"por diferencia de duración ({duration_diff:.2f}s > {config.max_auto_duration_diff:.2f}s). "
                 f"Requiere revisión manual obligatoria para prevenir borrado accidental."
             )
 

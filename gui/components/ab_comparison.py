@@ -224,11 +224,12 @@ class TrackPanel(QFrame):
         )
         layout.addWidget(spectral)
 
-        # Fake warning badge
-        if is_fake:
+        # Transcode warning badge / diagnostic (Phase C AC-005)
+        from core.spectral_types import SpectralAssessment
+        if is_fake or track.spectral_assessment == SpectralAssessment.SUSPECTED_TRANSCODE:
             warn_lbl = QLabel(
-                f"⚠  Fake Lossless — Corte espectral a "
-                f"{cutoff / 1000:.1f} kHz  ({track.fake_lossless_confidence:.0f}% confianza)"
+                f"⚠  Posible transcodificación — Corte espectral a "
+                f"{cutoff / 1000:.1f} kHz  ({track.fake_lossless_confidence:.0f}% consistencia)"
             )
             warn_lbl.setFont(QFont("Segoe UI", 9))
             warn_lbl.setStyleSheet(
@@ -237,8 +238,16 @@ class TrackPanel(QFrame):
             )
             warn_lbl.setWordWrap(True)
             layout.addWidget(warn_lbl)
+        elif track.spectral_assessment == SpectralAssessment.NO_LOSSY_EVIDENCE:
+            ok_lbl = QLabel("✓  Sin evidencia lossy detectada")
+            ok_lbl.setFont(QFont("Segoe UI", 9))
+            ok_lbl.setStyleSheet(
+                f"color: {COLORS['success']}; background: {COLORS['success_bg']};"
+                f"border: 1px solid {COLORS['success']}; border-radius: 6px; padding: 6px 10px;"
+            )
+            layout.addWidget(ok_lbl)
         elif track.is_lossless:
-            ok_lbl = QLabel("✓  Lossless auténtico — Señal completa hasta 20+ kHz")
+            ok_lbl = QLabel("✓  Lossless")
             ok_lbl.setFont(QFont("Segoe UI", 9))
             ok_lbl.setStyleSheet(
                 f"color: {COLORS['success']}; background: {COLORS['success_bg']};"

@@ -1,21 +1,34 @@
 """
-Clustering and Duplicate Grouping Engine using Disjoint-Set and Quality Ranking.
+Clustering and Duplicate Grouping Engine using Disjoint-Set, Quality Ranking,
+and Memory-Bounded Candidate Generation.
 """
 
-from typing import List, Dict, Set, Tuple, Optional
+from typing import List, Dict, Set, Tuple, Optional, Any, Union
 from collections import defaultdict
 import os
+import sys
+import logging
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import itertools
 
-from core.models import AudioTrack, DuplicateGroup, DuplicateType, FileAction, EvidenceReport
+from core.models import AudioTrack, DuplicateGroup, DuplicateType, FileAction, EvidenceReport, ScanCoverageReport
 from core.comparator import compare_tracks
+from core.config import DetectionConfig
 
 
-def _compare_chunk_worker(pairs: List[Tuple[AudioTrack, AudioTrack]]) -> List[EvidenceReport]:
+def _compare_chunk_worker(
+    pairs_or_item: Any,
+    config: Optional[DetectionConfig] = None
+) -> List[EvidenceReport]:
+    if isinstance(pairs_or_item, tuple) and len(pairs_or_item) == 2 and isinstance(pairs_or_item[1], DetectionConfig):
+        pairs, cfg = pairs_or_item
+    else:
+        pairs = pairs_or_item
+        cfg = config or DetectionConfig()
+
     results = []
     for t_a, t_b in pairs:
-        res = compare_tracks(t_a, t_b)
+        res = compare_tracks(t_a, t_b, config=cfg)
         if res.classification not in (DuplicateType.NO_MATCH, DuplicateType.UNCERTAIN):
             results.append(res)
     return results
@@ -49,28 +62,49 @@ class DisjointSet:
                 self.rank[root_a] += 1
 
 
+class DuplicateGroupList(list):
+    """Subclass of list that carries scan coverage metadata."""
+    def __init__(self, items=None, coverage: Optional[ScanCoverageReport] = None):
+        super().__init__(items or [])
+        self.coverage = coverage or ScanCoverageReport()
+
+
 def cluster_duplicates(
     tracks: List[AudioTrack],
     progress_callback=None,
-    is_cancelled=None
-) -> List[DuplicateGroup]:
+    is_cancelled=None,
+    config: Optional[DetectionConfig] = None,
+    max_bucket_size: int = 500,
+    max_pair_hits: int = 500_000,
+    return_coverage: bool = False
+) -> Union[List[DuplicateGroup], Tuple[List[DuplicateGroup], ScanCoverageReport]]:
     """
-    Efficiently clusters duplicates from a list of scanned AudioTracks.
-    
-    1. Instant $O(N)$ grouping by exact SHA-256 and PCM audio hashes.
-    2. Duration-bucketed acoustic fingerprint comparison on remaining tracks.
+    Clusters duplicate audio tracks with deterministic, memory-bounded candidate generation.
+
+    Pipeline:
+    1. Exact match clustering via SHA-256 (O(N)) and normalized PCM hash.
+    2. Duration-bucketed acoustic subfingerprint indexing with bounded candidate ingestion.
     3. Union-Find graph clustering.
     4. Quality scoring and 'Best File' recommendation per group.
+
+    Guarantees:
+    - Memory bounded during candidate generation (prevents runaway RAM on 100k tracks).
+    - Deterministic matching for identical inputs.
+    - Python 3.10+ executor compatibility (conditional max_tasks_per_child).
+    - Worker exception isolation (scan does not abort if a single worker crashes).
+    - Exact progress reporting: increments by actual len(chunk).
     """
+    config = config or DetectionConfig()
+    coverage = ScanCoverageReport()
+
     if len(tracks) < 2:
-        return []
+        return ([], coverage) if return_coverage else DuplicateGroupList([], coverage)
 
     track_map: Dict[str, AudioTrack] = {t.filepath: t for t in tracks}
     ds = DisjointSet()
     pair_results: Dict[Tuple[str, str], EvidenceReport] = {}
 
-    # Step 1: Instant Exact Hash Clustering (O(N))
-    # Step 1: Exact Matches (SHA256 and PCM Hash)
+    # Step 1: Exact Hash Matches (SHA256 and PCM Hash)
     sha_groups = defaultdict(list)
     for t in tracks:
         if t.sha256:
@@ -81,7 +115,6 @@ def cluster_duplicates(
             for i in range(len(group)):
                 for j in range(i + 1, len(group)):
                     ds.union(group[i].filepath, group[j].filepath)
-                    # We can directly create an EvidenceReport for exact matches
                     pair_results[(group[i].filepath, group[j].filepath)] = EvidenceReport(
                         track_a_path=group[i].filepath,
                         track_b_path=group[j].filepath,
@@ -104,10 +137,6 @@ def cluster_duplicates(
                     track_a = group[i]
                     track_b = group[j]
                     dur_diff = abs(track_a.duration - track_b.duration)
-                    # EXACT_AUDIO requires:
-                    # 1. Matching 30s prefix audio_hash
-                    # 2. Duration variance <= 0.5s
-                    # 3. Full normalized PCM stream verification
                     if dur_diff <= 0.5 and verify_full_normalized_pcm_match(track_a.filepath, track_b.filepath):
                         ds.union(track_a.filepath, track_b.filepath)
                         if (track_a.filepath, track_b.filepath) not in pair_results:
@@ -120,6 +149,12 @@ def cluster_duplicates(
                                 duration_diff=dur_diff,
                                 reasons=["Duplicado de Audio Exacto: Misma señal PCM normalizada completa decodificada."]
                             )
+
+    # Check cancellation after exact hash step
+    if is_cancelled and is_cancelled():
+        coverage.scan_status = "CANCELLED"
+        coverage.is_complete = False
+        return ([], coverage) if return_coverage else DuplicateGroupList([], coverage)
 
     # Step 2: High-Precision Subfingerprint Index with Duration Bucketing
     if progress_callback:
@@ -138,7 +173,6 @@ def cluster_duplicates(
                 if val not in seen:
                     seen.add(val)
                     shingle_index[val].append(idx)
-                # 28-bit prefix for MP3 compression tolerance
                 prefix_val = val & 0xFFFFFFF0
                 if prefix_val != val:
                     if prefix_val not in seen:
@@ -148,77 +182,129 @@ def cluster_duplicates(
     if progress_callback:
         progress_callback(0.0, 0, 0, "Filtrando coincidencias acústicas...")
 
-    # Accumulate co-occurring token counts between candidate track pairs
+    # Memory-Bounded Streaming Candidate Generation
     pair_hits = defaultdict(int)
-    max_bucket_size = 500
+    is_approximate = False
+    oversized_buckets = 0
+    candidate_pairs_generated = 0
+    candidate_pairs_dropped = 0
 
-    for s, group in shingle_index.items():
-        unique_group = list(set(group))
+    # Deterministic iteration over sorted shingle keys
+    sorted_shingles = sorted(shingle_index.keys())
+
+    for s in sorted_shingles:
+        if is_cancelled and is_cancelled():
+            coverage.scan_status = "CANCELLED"
+            coverage.is_complete = False
+            return ([], coverage) if return_coverage else DuplicateGroupList([], coverage)
+
+        group = shingle_index[s]
+        unique_group = sorted(list(set(group)))
         group_len = len(unique_group)
-        if 1 < group_len <= max_bucket_size:
-            for i in range(group_len):
-                idx_a = unique_group[i]
-                for j in range(i + 1, group_len):
-                    idx_b = unique_group[j]
-                    p1, p2 = (idx_a, idx_b) if idx_a < idx_b else (idx_b, idx_a)
-                    pair_hits[(p1, p2)] += 1
+
+        if group_len <= 1:
+            continue
+
+        # Check oversized bucket limit
+        if group_len > max_bucket_size:
+            oversized_buckets += 1
+            is_approximate = True
+            total_possible = (group_len * (group_len - 1)) // 2
+            retained_possible = (max_bucket_size * (max_bucket_size - 1)) // 2
+            candidate_pairs_dropped += (total_possible - retained_possible)
+            unique_group = unique_group[:max_bucket_size]
+            group_len = max_bucket_size
+
+        # Ingest pairs into pair_hits
+        for i in range(group_len):
+            idx_a = unique_group[i]
+            for j in range(i + 1, group_len):
+                idx_b = unique_group[j]
+                p1, p2 = (idx_a, idx_b) if idx_a < idx_b else (idx_b, idx_a)
+                candidate_pairs_generated += 1
+                pair_hits[(p1, p2)] += 1
+
+        # Memory cap applied DURING ingestion, not purely afterwards
+        eviction_threshold = int(max_pair_hits * 1.25)
+        if len(pair_hits) > eviction_threshold:
+            is_approximate = True
+            before_len = len(pair_hits)
+            # Evict singleton hit pairs (unlikely to reach min_hits >= 3)
+            pair_hits = defaultdict(int, {pair: count for pair, count in pair_hits.items() if count > 1})
+            candidate_pairs_dropped += (before_len - len(pair_hits))
+
+            if len(pair_hits) > max_pair_hits:
+                before_len2 = len(pair_hits)
+                pair_hits = defaultdict(int, {pair: count for pair, count in pair_hits.items() if count > 2})
+                candidate_pairs_dropped += (before_len2 - len(pair_hits))
 
     candidate_pairs_set = set()
-
-    # Cap pair_hits to avoid unbounded memory growth on very large libraries (100k+ tracks)
-    MAX_PAIRS = 500_000
-    if len(pair_hits) > MAX_PAIRS:
-        # Keep the pairs with highest hit count (most likely true duplicates)
-        pair_hits = dict(sorted(pair_hits.items(), key=lambda x: x[1], reverse=True)[:MAX_PAIRS])
-
     for (idx_a, idx_b), hits in pair_hits.items():
-        t_a = tracks[idx_a]
-        t_b = tracks[idx_b]
-        min_hits = 3
-        if hits >= min_hits:
+        if hits >= 3:
+            t_a = tracks[idx_a]
+            t_b = tracks[idx_b]
             if ds.find(t_a.filepath) != ds.find(t_b.filepath):
                 p1, p2 = (t_a.filepath, t_b.filepath) if t_a.filepath < t_b.filepath else (t_b.filepath, t_a.filepath)
                 candidate_pairs_set.add((p1, p2))
 
-
-    pairs_to_compare = [(track_map[p1], track_map[p2]) for p1, p2 in candidate_pairs_set]
+    candidate_pairs_retained = len(candidate_pairs_set)
+    pairs_to_compare = [(track_map[p1], track_map[p2]) for p1, p2 in sorted(candidate_pairs_set)]
     total_comparisons_est = len(pairs_to_compare)
     comparison_count = 0
+    worker_failures = 0
 
     if progress_callback:
         progress_callback(0.0, 0, total_comparisons_est, f"Comparando huellas acústicas (0/{total_comparisons_est:,})...")
 
-
     if total_comparisons_est > 0:
-        # Keep 1-2 CPU cores free to prevent system freeze and overheating
         cpu_cores = os.cpu_count() or 4
-        max_workers = max(1, min(6, cpu_cores - 1 if cpu_cores > 2 else cpu_cores))
-        
-        # Responsive chunk size for smooth UI progress
+        default_workers = max(1, min(6, cpu_cores - 1 if cpu_cores > 2 else cpu_cores))
+        max_workers = config.max_workers if config.max_workers is not None else default_workers
+
         chunk_size = min(1000, max(50, total_comparisons_est // (max_workers * 6) + 1))
         chunks = [pairs_to_compare[i:i + chunk_size] for i in range(0, total_comparisons_est, chunk_size)]
-        
-        # max_tasks_per_child=200: recycle worker processes periodically to prevent
-        # memory leaks from numpy/ffmpeg accumulated buffers in long-running scans.
-        with ProcessPoolExecutor(max_workers=max_workers, max_tasks_per_child=200) as executor:
-            futures = [executor.submit(_compare_chunk_worker, chunk) for chunk in chunks]
-            
+
+        executor_kwargs = {"max_workers": max_workers}
+        if sys.version_info >= (3, 11):
+            executor_kwargs["max_tasks_per_child"] = 200
+
+        with ProcessPoolExecutor(**executor_kwargs) as executor:
+            futures = []
+            chunk_map = {}
+            for chunk in chunks:
+                if is_cancelled and is_cancelled():
+                    coverage.scan_status = "CANCELLED"
+                    break
+                f = executor.submit(_compare_chunk_worker, chunk, config)
+                futures.append(f)
+                chunk_map[f] = chunk
+
             for future in as_completed(futures):
                 if is_cancelled and is_cancelled():
-                    executor.shutdown(wait=False, cancel_futures=True)
+                    coverage.scan_status = "CANCELLED"
+                    for f in futures:
+                        if not f.done():
+                            f.cancel()
+                    executor.shutdown(wait=True, cancel_futures=True)
                     break
-                
-                res_list = future.result()
-                for res in res_list:
-                    ds.union(res.track_a_path, res.track_b_path)
-                    pair_results[(res.track_a_path, res.track_b_path)] = res
-                
-                comparison_count += chunk_size
+
+                chunk = chunk_map.get(future, [])
+                try:
+                    res_list = future.result()
+                    for res in res_list:
+                        ds.union(res.track_a_path, res.track_b_path)
+                        pair_results[(res.track_a_path, res.track_b_path)] = res
+                except Exception as exc:
+                    worker_failures += 1
+                    is_approximate = True
+                    logging.getLogger(__name__).warning("Chunk worker exception isolated: %s", exc)
+
+                # Progreso exacto: incrementa por la longitud real del chunk
+                comparison_count += len(chunk)
                 curr_done = min(comparison_count, total_comparisons_est)
                 if progress_callback:
                     pct = min(1.0, curr_done / total_comparisons_est)
                     progress_callback(pct, curr_done, total_comparisons_est, f"Comparando acústicamente ({curr_done:,}/{total_comparisons_est:,})...")
-
 
     # Step 3: Collect Disjoint Sets into Groups
     groups_dict: Dict[str, List[AudioTrack]] = defaultdict(list)
@@ -226,7 +312,6 @@ def cluster_duplicates(
         root = ds.find(t.filepath)
         groups_dict[root].append(t)
 
-    # Filter out singletons (groups with only 1 file)
     duplicate_groups: List[DuplicateGroup] = []
     group_idx = 1
 
@@ -234,91 +319,87 @@ def cluster_duplicates(
         if len(group_tracks) <= 1:
             continue
 
-        # Sort group tracks by (effective quality score with duration penalty, quality_score, filesize)
-        max_duration = max((t.duration for t in group_tracks), default=0.0)
-        
-        def track_rank_key(t: AudioTrack):
-            # Duration penalty: if track is truncated (> 1.5s shorter than group maximum), penalize score
-            dur_penalty = 0.0
-            if max_duration > 0 and t.duration < (max_duration - 1.5):
-                dur_penalty = min(30.0, ((max_duration - t.duration) / max_duration) * 40.0)
-            
-            # Format preference bonus: FLAC/ALAC have proper metadata tags over raw WAV
-            fmt_bonus = 2.0 if t.format in ("FLAC", "ALAC") and t.fake_lossless_confidence <= 50.0 else 0.0
-            
-            effective_score = t.quality_score - dur_penalty + fmt_bonus
-            return (effective_score, t.quality_score, t.duration, -t.filesize)
+        # Sort group tracks by quality score, bitrate, filesize
+        group_tracks.sort(key=lambda t: (t.quality_score, t.bitrate, t.filesize), reverse=True)
 
-        group_tracks.sort(key=track_rank_key, reverse=True)
+        has_exact_hash = False
+        has_exact_audio = False
+        has_acoustic = False
+        has_possible = False
+        has_low_confidence = False
+        has_manual_review = False
+        max_confidence = 0.0
 
-        best_track = group_tracks[0]
-
-        # Determine primary duplicate type and average similarity
-        types_in_group = set()
-        total_sim = 0.0
-        pair_count = 0
-
-        has_weak_link = False
         for i in range(len(group_tracks)):
             for j in range(i + 1, len(group_tracks)):
                 p1 = group_tracks[i].filepath
                 p2 = group_tracks[j].filepath
-                res = pair_results.get((p1, p2)) or pair_results.get((p2, p1))
-                if res:
-                    types_in_group.add(res.classification)
-                    total_sim += res.confidence / 100.0
-                    pair_count += 1
-                    if getattr(res, "requires_manual_review", False):
-                        has_weak_link = True
-                    if res.classification in (DuplicateType.POSSIBLE_DUPLICATE, getattr(DuplicateType, "LOW_CONFIDENCE_REVIEW", None)):
-                        has_weak_link = True
-        
-        avg_sim = (total_sim / pair_count) * 100.0 if pair_count > 0 else 100.0
+                pair_key = (p1, p2) if (p1, p2) in pair_results else (p2, p1)
+                rep = pair_results.get(pair_key)
+                if rep:
+                    if rep.confidence > max_confidence:
+                        max_confidence = rep.confidence
+                    if rep.classification == DuplicateType.EXACT_HASH:
+                        has_exact_hash = True
+                    elif rep.classification == DuplicateType.EXACT_AUDIO:
+                        has_exact_audio = True
+                    elif rep.classification == DuplicateType.ACOUSTIC_DUPLICATE:
+                        has_acoustic = True
+                    elif rep.classification == DuplicateType.POSSIBLE_DUPLICATE:
+                        has_possible = True
+                    elif rep.classification == DuplicateType.LOW_CONFIDENCE_REVIEW:
+                        has_low_confidence = True
+                    if rep.requires_manual_review:
+                        has_manual_review = True
 
-        if has_weak_link:
+        # Safety firewall: A cluster with any weak link or manual review requirement fails-closed
+        if has_low_confidence:
+            primary_type = DuplicateType.LOW_CONFIDENCE_REVIEW
+            has_manual_review = True
+        elif has_possible:
             primary_type = DuplicateType.POSSIBLE_DUPLICATE
-            req_review = True
+            has_manual_review = True
+        elif has_acoustic:
+            primary_type = DuplicateType.ACOUSTIC_DUPLICATE
+        elif has_exact_audio:
+            primary_type = DuplicateType.EXACT_AUDIO
+        elif has_exact_hash:
+            primary_type = DuplicateType.EXACT_HASH
         else:
-            if DuplicateType.EXACT_HASH in types_in_group and len(types_in_group) == 1:
-                primary_type = DuplicateType.EXACT_HASH
-            elif DuplicateType.EXACT_AUDIO in types_in_group and len(types_in_group) <= 2:
-                primary_type = DuplicateType.EXACT_AUDIO
-            elif DuplicateType.ACOUSTIC_DUPLICATE in types_in_group:
-                primary_type = DuplicateType.ACOUSTIC_DUPLICATE
-            else:
-                primary_type = DuplicateType.POSSIBLE_DUPLICATE
-            req_review = primary_type in (DuplicateType.POSSIBLE_DUPLICATE, getattr(DuplicateType, "LOW_CONFIDENCE_REVIEW", None))
+            primary_type = DuplicateType.ACOUSTIC_DUPLICATE
 
-        # Formulate human explanation for best track recommendation
-        best_reason = f"Mayor fidelidad: {best_track.quality_details} (Puntuación: {best_track.quality_score}/100)"
-        if best_track.fake_lossless_confidence > 50.0:
-            best_reason = f"⚠️ Nota: Transcodificación probable ({best_track.fake_lossless_confidence:.0f}%). Se seleccionó la mejor fuente disponible."
-        if has_weak_link:
-            best_reason += " [Requiere Revisión Manual: el grupo contiene aristas no confirmadas o con variación de duración]"
-
-        # Mark default actions: keep best, mark others as delete (or unset for review)
+        best_track = group_tracks[0]
         for t in group_tracks:
-            if req_review:
+            if has_manual_review:
                 t.action = FileAction.UNSET
             else:
-                if t.filepath == best_track.filepath:
-                    t.action = FileAction.KEEP
-                else:
-                    t.action = FileAction.DELETE
+                t.action = FileAction.KEEP if t.filepath == best_track.filepath else FileAction.DELETE
 
-        dup_group = DuplicateGroup(
-            group_id=f"GRP-{group_idx:04d}",
+        reason = f"Mejor calidad detectada ({best_track.quality_score:.0f} pts)"
+        group = DuplicateGroup(
+            group_id=f"group_{group_idx:03d}",
             primary_type=primary_type,
             tracks=group_tracks,
             best_track_path=best_track.filepath,
-            best_track_reason=best_reason,
-            average_similarity=round(avg_sim, 1),
-            requires_manual_review=req_review
+            best_track_reason=reason,
+            average_similarity=max_confidence,
+            requires_manual_review=has_manual_review
         )
-        dup_group.recalculate_space_saving()
-        duplicate_groups.append(dup_group)
+        group.recalculate_space_saving()
+        duplicate_groups.append(group)
         group_idx += 1
 
-    # Sort groups by potential space saving (highest first)
-    duplicate_groups.sort(key=lambda g: g.space_saving_bytes, reverse=True)
-    return duplicate_groups
+    # Populate final coverage report
+    coverage.is_complete = (worker_failures == 0) and (not is_approximate)
+    coverage.is_approximate = is_approximate
+    coverage.oversized_buckets = oversized_buckets
+    coverage.candidate_pairs_generated = candidate_pairs_generated
+    coverage.candidate_pairs_retained = candidate_pairs_retained
+    coverage.candidate_pairs_dropped = candidate_pairs_dropped
+    coverage.worker_failures = worker_failures
+    coverage.actual_comparisons = comparison_count
+    if coverage.scan_status != "CANCELLED":
+        coverage.scan_status = "SUCCESS"
+
+    result_list = DuplicateGroupList(duplicate_groups, coverage)
+    return (duplicate_groups, coverage) if return_coverage else result_list
