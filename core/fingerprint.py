@@ -50,36 +50,8 @@ def _set_subprocess_low_priority(proc: subprocess.Popen):
         pass  # Non-fatal: if it fails, we just run at normal priority
 
 
-def get_fpcalc_path() -> str:
-    """Find local fpcalc binary or fallback to PATH, with support for PyInstaller bundles."""
-    # 1. Check PyInstaller temp directory (_MEIPASS)
-    if hasattr(sys, "_MEIPASS"):
-        meipass_bin = os.path.join(sys._MEIPASS, "bin", "fpcalc.exe" if sys.platform == "win32" else "fpcalc")
-        if os.path.isfile(meipass_bin):
-            return meipass_bin
-        meipass_root_bin = os.path.join(sys._MEIPASS, "fpcalc.exe" if sys.platform == "win32" else "fpcalc")
-        if os.path.isfile(meipass_root_bin):
-            return meipass_root_bin
-
-    # 2. Check directory where executable/script is located
-    exe_dir = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
-    candidates = [
-        os.path.join(exe_dir, "bin", "fpcalc.exe" if sys.platform == "win32" else "fpcalc"),
-        os.path.join(exe_dir, "fpcalc.exe" if sys.platform == "win32" else "fpcalc"),
-        os.path.join(os.path.dirname(exe_dir), "bin", "fpcalc.exe" if sys.platform == "win32" else "fpcalc"),
-        os.path.join(os.getcwd(), "bin", "fpcalc.exe" if sys.platform == "win32" else "fpcalc")
-    ]
-    for candidate in candidates:
-        if os.path.isfile(candidate):
-            return candidate
-
-    # 3. Check system PATH
-    import shutil
-    sys_fpcalc = shutil.which("fpcalc")
-    if sys_fpcalc:
-        return sys_fpcalc
-        
-    return candidates[0]
+from core.binary_resolver import get_fpcalc_path, get_ffmpeg_path, get_ffprobe_path
+from core.ffmpeg_runner import terminate_process_tree
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -141,8 +113,9 @@ def compute_audio_pcm_hash(filepath: str, sample_rate: int = 11025, max_seconds:
     y verificación en streaming del flujo PCM normalizado completo con verify_full_normalized_pcm_match.
     """
     try:
+        ffmpeg_bin = get_ffmpeg_path() or "ffmpeg"
         cmd = [
-            "ffmpeg", "-v", "quiet", "-nostdin",
+            ffmpeg_bin, "-v", "quiet", "-nostdin",
             "-i", filepath,
             "-t", str(max_seconds),   # only first 30s as fast pre-filter
             "-f", "s16le", "-ac", "1", "-ar", str(sample_rate),
@@ -198,8 +171,9 @@ def get_audio_stream_info(filepath: str) -> Optional[AudioStreamInfo]:
     if not filepath or not os.path.isfile(filepath):
         return None
 
+    ffprobe_bin = get_ffprobe_path() or "ffprobe"
     cmd = [
-        "ffprobe", "-v", "quiet", "-print_format", "json",
+        ffprobe_bin, "-v", "quiet", "-print_format", "json",
         "-show_streams", "-select_streams", "a:0", filepath
     ]
     startupinfo = _get_low_priority_startupinfo() if sys.platform == "win32" else None
@@ -428,14 +402,7 @@ def verify_full_normalized_pcm_match(
     finally:
         for p in (proc_a, proc_b):
             if p is not None:
-                try:
-                    if p.stdout is not None:
-                        p.stdout.close()
-                    if p.poll() is None:
-                        p.kill()
-                    p.wait(timeout=1.0)
-                except Exception:
-                    pass
+                terminate_process_tree(p)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

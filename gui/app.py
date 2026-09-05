@@ -677,8 +677,15 @@ class AudioDuplicateDetectorApp(QMainWindow):
             else:
                 self.scanner.stop()
             # Wait cooperatively for worker thread to stop
-            if not self.worker.wait(5000):
-                logger.warning("El hilo del scanner no se detuvo dentro del tiempo límite de 5000ms.")
+            stopped = self.worker.wait(5000)
+            if not stopped or self.worker.isRunning():
+                logger.warning(
+                    "El hilo del scanner no se detuvo dentro del tiempo límite de 5000ms. "
+                    "Abortando cierre para proteger la base de datos y la sesión."
+                )
+                if event is not None and hasattr(event, "ignore"):
+                    event.ignore()
+                return
 
         # 2. Persist state safely via atomic session save
         self._save_current_session()

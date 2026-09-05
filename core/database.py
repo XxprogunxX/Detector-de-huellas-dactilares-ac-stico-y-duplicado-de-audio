@@ -1,5 +1,6 @@
 """
 SQLite Database caching engine for Audio Tracks, Fingerprints and Metadata.
+Includes additive, idempotent schema migration for nanosecond mtime and quick signature.
 """
 
 import os
@@ -155,19 +156,76 @@ class Database:
                     title TEXT,
                     artist TEXT,
                     album TEXT,
+                    mtime_ns INTEGER DEFAULT 0,
+                    quick_signature TEXT DEFAULT '',
                     last_scanned TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_cache ON tracks(filepath, filesize, mtime);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_sha256 ON tracks(sha256);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_audio_hash ON tracks(audio_hash);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_duration ON tracks(duration);")
-            
-            # Migrate old column if exists
+            self._migrate_schema(conn)
+
+    def _migrate_schema(self, conn: sqlite3.Connection):
+        """
+        Additive and idempotent schema migration.
+        Inspects PRAGMA table_info(tracks) and safely applies ALTER TABLE if columns are missing.
+        Never drops or recreates existing tables, preserving all existing user tracks.
+        """
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(tracks);")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        if "is_fake_lossless" in columns and "fake_lossless_confidence" not in columns:
             try:
                 conn.execute("ALTER TABLE tracks RENAME COLUMN is_fake_lossless TO fake_lossless_confidence;")
             except sqlite3.OperationalError:
                 pass
+
+        STANDARD_OPTIONAL_COLUMNS = {
+            "sha256": "TEXT",
+            "audio_hash": "TEXT",
+            "duration": "REAL",
+            "format": "TEXT",
+            "bitrate": "INTEGER",
+            "samplerate": "INTEGER",
+            "channels": "INTEGER",
+            "bit_depth": "INTEGER",
+            "is_lossless": "INTEGER",
+            "spectral_cutoff": "REAL",
+            "fake_lossless_confidence": "REAL",
+            "quality_score": "REAL",
+            "quality_details": "TEXT",
+            "fingerprint": "BLOB",
+            "title": "TEXT",
+            "artist": "TEXT",
+            "album": "TEXT",
+            "mtime_ns": "INTEGER DEFAULT 0",
+            "quick_signature": "TEXT DEFAULT ''"
+        }
+        for col, col_type in STANDARD_OPTIONAL_COLUMNS.items():
+            if col not in columns:
+                try:
+                    conn.execute(f"ALTER TABLE tracks ADD COLUMN {col} {col_type};")
+                except sqlite3.OperationalError:
+                    pass
+
+        # Re-check columns to safely create indexes only if columns exist
+        cursor.execute("PRAGMA table_info(tracks);")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        if "filepath" in columns and "filesize" in columns and "mtime" in columns:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_cache ON tracks(filepath, filesize, mtime);")
+        if "sha256" in columns:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sha256 ON tracks(sha256);")
+        if "audio_hash" in columns:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_audio_hash ON tracks(audio_hash);")
+        if "duration" in columns:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_duration ON tracks(duration);")
+        if "mtime_ns" in columns:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_ns ON tracks(filepath, filesize, mtime_ns);")
+
+    def migrate_schema_if_needed(self):
+        """Public idempotent entry point for schema migration."""
+        with self._get_connection() as conn:
+            self._migrate_schema(conn)
 
     def get_all_cached_lookup(self) -> Dict[str, AudioTrack]:
         """Returns a fast lookup dict of all cached AudioTracks indexed by filepath."""
@@ -177,7 +235,8 @@ class Database:
             cursor.execute(
                 "SELECT id, filepath, filesize, mtime, sha256, audio_hash, duration, format, "
                 "bitrate, samplerate, channels, bit_depth, is_lossless, spectral_cutoff, "
-                "fake_lossless_confidence, quality_score, quality_details, fingerprint, title, artist, album "
+                "fake_lossless_confidence, quality_score, quality_details, fingerprint, title, artist, album, "
+                "mtime_ns, quick_signature "
                 "FROM tracks"
             )
             for row in cursor.fetchall():
@@ -186,26 +245,34 @@ class Database:
         return lookup
 
     def get_lightweight_cache_lookup(self) -> Dict[str, tuple]:
-        """Returns a fast lookup dict of (filesize, mtime) indexed by filepath.
-        Uses cursor iteration (not fetchall) to avoid loading the entire table into RAM.
-        """
+        """Returns a fast lookup dict of (filesize, mtime) indexed by filepath."""
         lookup = {}
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT filepath, filesize, mtime FROM tracks")
-            # Iterate the cursor row-by-row to keep peak RAM low on large libraries
             for row in cursor:
                 lookup[row[0]] = (row[1], row[2])
         return lookup
 
+    def get_lightweight_cache_lookup_v2(self) -> Dict[str, tuple]:
+        """Returns a fast lookup dict of (filesize, mtime_ns, quick_signature) indexed by filepath."""
+        lookup = {}
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT filepath, filesize, mtime_ns, quick_signature FROM tracks")
+            for row in cursor:
+                lookup[row[0]] = (row[1], row[2] or 0, row[3] or "")
+        return lookup
+
     def get_track_by_cache(self, filepath: str, filesize: int, mtime: float) -> Optional[AudioTrack]:
-        """Returns cached AudioTrack if file size and modified time match exactly."""
+        """Returns cached AudioTrack if file size and modified time match."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT id, filepath, filesize, mtime, sha256, audio_hash, duration, format, "
                 "bitrate, samplerate, channels, bit_depth, is_lossless, spectral_cutoff, "
-                "fake_lossless_confidence, quality_score, quality_details, fingerprint, title, artist, album "
+                "fake_lossless_confidence, quality_score, quality_details, fingerprint, title, artist, album, "
+                "mtime_ns, quick_signature "
                 "FROM tracks WHERE filepath = ? AND filesize = ? AND ABS(mtime - ?) < 0.001",
                 (filepath, filesize, mtime)
             )
@@ -213,6 +280,26 @@ class Database:
             if not row:
                 return None
             return self._row_to_track(row)
+
+    def get_track_by_cache_v2(self, filepath: str, filesize: int, mtime_ns: int, quick_signature: str = "") -> Optional[AudioTrack]:
+        """Returns cached AudioTrack if file size, mtime_ns, and quick_signature match."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, filepath, filesize, mtime, sha256, audio_hash, duration, format, "
+                "bitrate, samplerate, channels, bit_depth, is_lossless, spectral_cutoff, "
+                "fake_lossless_confidence, quality_score, quality_details, fingerprint, title, artist, album, "
+                "mtime_ns, quick_signature "
+                "FROM tracks WHERE filepath = ? AND filesize = ? AND mtime_ns = ?",
+                (filepath, filesize, mtime_ns)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            track = self._row_to_track(row)
+            if quick_signature and track.quick_signature and track.quick_signature != quick_signature:
+                return None
+            return track
 
     def upsert_track(self, track: AudioTrack):
         """Inserts or updates track record in cache."""
@@ -222,8 +309,9 @@ class Database:
                 INSERT INTO tracks (
                     filepath, filesize, mtime, sha256, audio_hash, duration, format,
                     bitrate, samplerate, channels, bit_depth, is_lossless, spectral_cutoff,
-                    fake_lossless_confidence, quality_score, quality_details, fingerprint, title, artist, album, last_scanned
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    fake_lossless_confidence, quality_score, quality_details, fingerprint, title, artist, album,
+                    mtime_ns, quick_signature, last_scanned
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(filepath) DO UPDATE SET
                     filesize = excluded.filesize,
                     mtime = excluded.mtime,
@@ -244,13 +332,16 @@ class Database:
                     title = excluded.title,
                     artist = excluded.artist,
                     album = excluded.album,
+                    mtime_ns = excluded.mtime_ns,
+                    quick_signature = excluded.quick_signature,
                     last_scanned = CURRENT_TIMESTAMP;
             """, (
                 track.filepath, track.filesize, track.mtime, track.sha256, track.audio_hash,
                 track.duration, track.format, track.bitrate, track.samplerate, track.channels,
                 track.bit_depth, 1 if track.is_lossless else 0, track.spectral_cutoff,
                 track.fake_lossless_confidence, track.quality_score, track.quality_details,
-                fp_blob, track.title, track.artist, track.album
+                fp_blob, track.title, track.artist, track.album,
+                track.mtime_ns, track.quick_signature
             ))
 
     def upsert_tracks_batch(self, tracks: List[AudioTrack]):
@@ -265,15 +356,17 @@ class Database:
                 t.duration, t.format, t.bitrate, t.samplerate, t.channels,
                 t.bit_depth, 1 if t.is_lossless else 0, t.spectral_cutoff,
                 t.fake_lossless_confidence, t.quality_score, t.quality_details,
-                fp_blob, t.title, t.artist, t.album
+                fp_blob, t.title, t.artist, t.album,
+                t.mtime_ns, t.quick_signature
             ))
         with self._get_connection() as conn:
             conn.executemany("""
                 INSERT INTO tracks (
                     filepath, filesize, mtime, sha256, audio_hash, duration, format,
                     bitrate, samplerate, channels, bit_depth, is_lossless, spectral_cutoff,
-                    fake_lossless_confidence, quality_score, quality_details, fingerprint, title, artist, album, last_scanned
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    fake_lossless_confidence, quality_score, quality_details, fingerprint, title, artist, album,
+                    mtime_ns, quick_signature, last_scanned
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(filepath) DO UPDATE SET
                     filesize = excluded.filesize,
                     mtime = excluded.mtime,
@@ -294,6 +387,8 @@ class Database:
                     title = excluded.title,
                     artist = excluded.artist,
                     album = excluded.album,
+                    mtime_ns = excluded.mtime_ns,
+                    quick_signature = excluded.quick_signature,
                     last_scanned = CURRENT_TIMESTAMP;
             """, data)
 
@@ -320,7 +415,8 @@ class Database:
                 cursor.execute(
                     f"SELECT id, filepath, filesize, mtime, sha256, audio_hash, duration, format, "
                     f"bitrate, samplerate, channels, bit_depth, is_lossless, spectral_cutoff, "
-                    f"fake_lossless_confidence, quality_score, quality_details, fingerprint, title, artist, album "
+                    f"fake_lossless_confidence, quality_score, quality_details, fingerprint, title, artist, album, "
+                    f"mtime_ns, quick_signature "
                     f"FROM tracks WHERE filepath IN ({placeholders})",
                     chunk
                 )
@@ -379,7 +475,8 @@ class Database:
             query = (
                 f"SELECT id, filepath, filesize, mtime, sha256, audio_hash, duration, format, "
                 f"bitrate, samplerate, channels, bit_depth, is_lossless, spectral_cutoff, "
-                f"fake_lossless_confidence, quality_score, quality_details, {fp_col}, title, artist, album "
+                f"fake_lossless_confidence, quality_score, quality_details, {fp_col}, title, artist, album, "
+                f"mtime_ns, quick_signature "
                 f"FROM tracks"
             )
             params = ()
@@ -413,20 +510,39 @@ class Database:
                 }
         return stats
 
-
     def _row_to_track(self, row: tuple, decompress_fp: bool = True) -> AudioTrack:
-        (
-            tid, filepath, filesize, mtime, sha256, audio_hash, duration, fmt,
-            bitrate, samplerate, channels, bit_depth, is_lossless, spectral_cutoff,
-            fake_lossless_confidence, quality_score, quality_details, fp_blob, title, artist, album
-        ) = row
-        
+        tid = row[0]
+        filepath = row[1]
+        filesize = row[2]
+        mtime = row[3]
+        sha256 = row[4]
+        audio_hash = row[5]
+        duration = row[6]
+        fmt = row[7]
+        bitrate = row[8]
+        samplerate = row[9]
+        channels = row[10]
+        bit_depth = row[11]
+        is_lossless = row[12]
+        spectral_cutoff = row[13]
+        fake_lossless_confidence = row[14]
+        quality_score = row[15]
+        quality_details = row[16]
+        fp_blob = row[17]
+        title = row[18]
+        artist = row[19]
+        album = row[20]
+        mtime_ns = row[21] if len(row) > 21 and row[21] is not None else int((mtime or 0.0) * 1_000_000_000)
+        quick_sig = row[22] if len(row) > 22 and row[22] is not None else ""
+
         raw_fp = (decompress_fingerprint(fp_blob) if fp_blob else []) if decompress_fp else []
         return AudioTrack(
             id=tid,
             filepath=filepath,
             filesize=filesize,
             mtime=mtime,
+            mtime_ns=mtime_ns or 0,
+            quick_signature=quick_sig or "",
             sha256=sha256 or "",
             audio_hash=audio_hash or "",
             duration=duration or 0.0,
@@ -445,5 +561,3 @@ class Database:
             artist=artist or "",
             album=album or ""
         )
-
-

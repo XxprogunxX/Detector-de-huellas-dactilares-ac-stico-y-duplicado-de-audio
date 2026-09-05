@@ -5,9 +5,9 @@ from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 block_cipher = None
 
-# Ensure bin/fpcalc.exe and app_icon.png are included in the package
+# Ensure bin directory (fpcalc, ffmpeg, ffprobe) and app_icon are included in the package
 datas = [
-    ('bin/fpcalc.exe', 'bin') if os.path.exists('bin/fpcalc.exe') else ('bin', 'bin'),
+    ('bin', 'bin') if os.path.exists('bin') else ('bin/fpcalc.exe', 'bin'),
     ('app_icon.png', '.') if os.path.exists('app_icon.png') else ('app_icon.ico', '.'),
 ]
 
@@ -31,6 +31,7 @@ hiddenimports = [
     'numpy',
     'scipy',
     'rich',
+    'psutil',
 ]
 
 a = Analysis(

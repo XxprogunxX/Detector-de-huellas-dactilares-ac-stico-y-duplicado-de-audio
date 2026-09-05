@@ -1,8 +1,10 @@
+from core.cache_signature import compute_quick_signature, is_cache_valid
 """
 High-Performance Audio Scanner Engine with Multiprocessing, Incremental Caching and Pause/Resume.
 """
 
 import os
+import sys
 import time
 import itertools
 import threading
@@ -82,16 +84,19 @@ def _process_audio_worker(
         if filesize == 0:
             return None
         mtime = stat.st_mtime
+        mtime_ns = getattr(stat, "st_mtime_ns", int(mtime * 1_000_000_000))
+        quick_sig = compute_quick_signature(filepath)
 
         # 1. Metadata first (bitrate, sample rate, channels, tags, duration)
         meta = extract_metadata(filepath)
         duration = meta.get("duration", 0.0)
 
-        # 2. Binary SHA-256 Hash (always computed to preserve EXACT_HASH even for short files)
+        # 2. Binary SHA-256 Hash (always computed to preserve EXACT_HASH even if fpcalc fails)
         sha256 = compute_file_sha256(filepath)
 
         # 3. Acoustic Fingerprint (fpcalc)
         # Gated by min_duration. If duration is unknown from metadata (0.0), attempt fpcalc to discover duration.
+        # CRITICAL SAFETY (Phase E): fpcalc failure or absence NEVER drops the track; SHA-256 and metadata survive.
         raw_fp = None
         if duration <= 0.0 or duration >= min_duration:
             try:
@@ -104,7 +109,10 @@ def _process_audio_worker(
                 raw_fp = None
 
         # 4. PCM Audio Hash (first 30s only — see fingerprint.py)
-        audio_hash = compute_audio_pcm_hash(filepath)
+        try:
+            audio_hash = compute_audio_pcm_hash(filepath)
+        except Exception:
+            audio_hash = ""
 
         # 5. Selective Spectral Assessment (Phase C / AC-005, AC-017)
         # Gated by spectral_analysis flag and lossless container status.
@@ -137,6 +145,8 @@ def _process_audio_worker(
             "filepath": filepath,
             "filesize": filesize,
             "mtime": mtime,
+            "mtime_ns": mtime_ns,
+            "quick_signature": quick_sig,
             "sha256": sha256,
             "audio_hash": audio_hash,
             "duration": duration,
@@ -285,7 +295,7 @@ class AudioScanner:
         tracks_to_process: List[str] = []
         all_tracks: List[AudioTrack] = []
         
-        cached_map = self.db.get_lightweight_cache_lookup()
+        cached_map = self.db.get_lightweight_cache_lookup_v2()
         total_discovered = len(discovered_files)
 
         cached_paths_to_load: List[str] = []
@@ -296,10 +306,21 @@ class AudioScanner:
             try:
                 stat = os.stat(fpath)
                 cached = cached_map.get(fpath)
-                if cached and cached[0] == stat.st_size and abs(cached[1] - stat.st_mtime) < 0.001:
-                    cached_paths_to_load.append(fpath)
-                    self.stats.files_from_cache += 1
-                    self.stats.files_scanned += 1
+                curr_mtime_ns = getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))
+                if cached and cached[0] == stat.st_size and cached[1] == curr_mtime_ns:
+                    stored_sig = cached[2] if len(cached) > 2 else ""
+                    if stored_sig:
+                        curr_sig = compute_quick_signature(fpath)
+                        if curr_sig == stored_sig:
+                            cached_paths_to_load.append(fpath)
+                            self.stats.files_from_cache += 1
+                            self.stats.files_scanned += 1
+                        else:
+                            tracks_to_process.append(fpath)
+                    else:
+                        cached_paths_to_load.append(fpath)
+                        self.stats.files_from_cache += 1
+                        self.stats.files_scanned += 1
                 else:
                     tracks_to_process.append(fpath)
             except Exception:
@@ -320,7 +341,10 @@ class AudioScanner:
             # Stream tasks to avoid holding 40k futures in memory simultaneously
             # initializer: each worker process lowers its own CPU priority to
             # BELOW_NORMAL so the GUI and OS always stay responsive.
-            with ProcessPoolExecutor(max_workers=self.max_workers, initializer=_worker_process_init) as executor:
+            executor_kwargs = {"max_workers": self.max_workers, "initializer": _worker_process_init}
+            if sys.version_info >= (3, 11):
+                executor_kwargs["max_tasks_per_child"] = 200
+            with ProcessPoolExecutor(**executor_kwargs) as executor:
                 max_in_flight = self.max_workers * 4
                 file_iter = iter(tracks_to_process)
                 futures = {}
@@ -350,12 +374,21 @@ class AudioScanner:
                         self.stats.current_file = os.path.basename(path)
 
                         try:
-                            res = future.result()
+                            try:
+                                res = future.result()
+                            except Exception as worker_err:
+                                logging.getLogger(__name__).warning("Worker failed processing %s: %s", path, worker_err)
+                                self.stats.files_failed += 1
+                                self.stats.is_complete = False
+                                self.stats.is_approximate = True
+                                res = None
                             if res:
                                 track = AudioTrack(
                                     filepath=res["filepath"],
                                     filesize=res["filesize"],
                                     mtime=res["mtime"],
+                                    mtime_ns=res.get("mtime_ns", int(res["mtime"] * 1_000_000_000)),
+                                    quick_signature=res.get("quick_signature", ""),
                                     sha256=res["sha256"],
                                     audio_hash=res["audio_hash"],
                                     duration=res["duration"],

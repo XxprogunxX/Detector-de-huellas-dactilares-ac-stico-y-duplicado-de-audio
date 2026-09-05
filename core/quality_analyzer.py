@@ -1,3 +1,5 @@
+from core.binary_resolver import get_ffmpeg_path
+from core.ffmpeg_runner import terminate_process_tree
 """
 Audio Quality Analysis and Evidence-Based Spectral Assessment (Phase C / AC-005, AC-017).
 

@@ -32,6 +32,8 @@ class AudioTrack:
     filepath: str
     filesize: int = 0
     mtime: float = 0.0
+    mtime_ns: int = 0
+    quick_signature: str = ""
     sha256: str = ""
     audio_hash: str = ""
     duration: float = 0.0
@@ -85,6 +87,8 @@ class AudioTrack:
             "filename": self.filename,
             "filesize": self.filesize,
             "mtime": self.mtime,
+            "mtime_ns": self.mtime_ns,
+            "quick_signature": self.quick_signature,
             "sha256": self.sha256,
             "audio_hash": self.audio_hash,
             "duration": self.duration,
@@ -129,6 +133,8 @@ class AudioTrack:
             filepath=data.get("filepath", ""),
             filesize=data.get("filesize", 0),
             mtime=data.get("mtime", 0.0),
+            mtime_ns=data.get("mtime_ns", int(data.get("mtime", 0.0) * 1_000_000_000)),
+            quick_signature=data.get("quick_signature", ""),
             sha256=data.get("sha256", ""),
             audio_hash=data.get("audio_hash", ""),
             duration=data.get("duration", 0.0),
@@ -273,8 +279,28 @@ def prune_duplicate_groups(groups: List[DuplicateGroup]) -> List[DuplicateGroup]
 
 
 @dataclass
+class ScanCoverageReport:
+    is_complete: bool = True
+    is_approximate: bool = False
+    candidate_pairs_generated: int = 0
+    candidate_pairs_retained: int = 0
+    candidate_pairs_dropped: int = 0
+    oversized_buckets: int = 0
+    worker_failures: int = 0
+    actual_comparisons: int = 0
+    scan_status: str = "SUCCESS"  # SUCCESS, CANCELLED, FAILED
+
+
+@dataclass
 class ScanStats:
     total_files_found: int = 0
+    is_complete: bool = True
+    is_approximate: bool = False
+    candidate_pairs_generated: int = 0
+    candidate_pairs_retained: int = 0
+    candidate_pairs_dropped: int = 0
+    oversized_buckets: int = 0
+    worker_failures: int = 0
     files_scanned: int = 0
     files_from_cache: int = 0
     files_failed: int = 0

@@ -1,0 +1,39 @@
+# ==============================================================================
+# AUDIO-CLEANER — Reproducible Lock File
+# Target Environment: Windows 10/11 x86_64, CPython 3.13.x
+# Target Status: Windows build verified (NOT tested on macOS / Linux)
+# Generated: 2026-09-04
+# Note: Python 3.10, 3.11, and 3.12 require corresponding platform wheels.
+# ==============================================================================
+
+# Core GUI & UI Framework
+PyQt6==6.11.0
+PyQt6-Qt6==6.11.1
+PyQt6_sip==13.12.0
+QtAwesome==1.4.2
+QtPy==2.4.3
+
+# Audio Analysis & Signal Processing
+numpy==2.3.3
+scipy==1.16.2
+mutagen==1.48.1
+pyacoustid==1.3.1
+pygame==2.6.1
+
+# System, Safe File Deletion & Process Tree Management
+psutil==7.2.2
+Send2Trash==2.1.0
+colorama==0.4.6
+rich==15.0.0
+markdown-it-py==4.2.0
+mdurl==0.1.2
+Pygments==2.20.0
+
+# Windows OS Native & Packaging
+pywin32==312
+pywin32-ctypes==0.2.3
+pypiwin32==223
+altgraph==0.17.5
+pefile==2024.8.26
+pyinstaller==6.22.2
+pyinstaller-hooks-contrib==2026.6

@@ -331,9 +331,9 @@ class TestApplicationShutdownAndLifecycle(unittest.TestCase):
         temp_db.close()
         app_win = AudioDuplicateDetectorApp()
 
-        # Mock running worker
+        # Mock running worker that stops after wait
         mock_worker = MagicMock()
-        mock_worker.isRunning.return_value = True
+        mock_worker.isRunning.side_effect = [True, False, False, False]
         mock_worker.wait.return_value = True
         app_win.worker = mock_worker
 
@@ -345,6 +345,37 @@ class TestApplicationShutdownAndLifecycle(unittest.TestCase):
             mock_worker.wait.assert_called_once_with(5000)
             mock_db_close.assert_called_once()
 
+        app_win.worker = None
+        app_win.close()
+        if os.path.exists(temp_db.name):
+            try:
+                os.remove(temp_db.name)
+            except OSError:
+                pass
+
+    def test_close_timeout_does_not_close_database_while_worker_alive(self):
+        """Microadjustment D: If worker fails to stop within 5000ms or isRunning is still True, do NOT close DB and ignore event."""
+        temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        temp_db.close()
+        app_win = AudioDuplicateDetectorApp()
+
+        mock_worker = MagicMock()
+        mock_worker.isRunning.return_value = True
+        mock_worker.wait.return_value = False  # Worker timed out!
+        app_win.worker = mock_worker
+
+        mock_event = MagicMock()
+        with patch.object(app_win.db, "close") as mock_db_close, \
+             patch.object(app_win, "_save_current_session") as mock_save_session:
+            app_win.closeEvent(mock_event)
+            mock_worker.cancel.assert_called_once()
+            mock_worker.wait.assert_called_once_with(5000)
+            mock_db_close.assert_not_called()
+            mock_save_session.assert_not_called()
+            mock_event.ignore.assert_called_once()
+            mock_event.accept.assert_not_called()
+
+        app_win.worker = None
         app_win.close()
         if os.path.exists(temp_db.name):
             try:
