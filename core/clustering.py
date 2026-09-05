@@ -2,7 +2,7 @@
 Clustering and Duplicate Grouping Engine using Disjoint-Set and Quality Ranking.
 """
 
-from typing import List, Dict, Set, Tuple, Optional
+from typing import List, Dict, Set, Tuple, Optional, Any
 from collections import defaultdict
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -10,12 +10,22 @@ import itertools
 
 from core.models import AudioTrack, DuplicateGroup, DuplicateType, FileAction, EvidenceReport
 from core.comparator import compare_tracks
+from core.config import DetectionConfig
 
 
-def _compare_chunk_worker(pairs: List[Tuple[AudioTrack, AudioTrack]]) -> List[EvidenceReport]:
+def _compare_chunk_worker(
+    pairs_or_item: Any,
+    config: Optional[DetectionConfig] = None
+) -> List[EvidenceReport]:
+    if isinstance(pairs_or_item, tuple) and len(pairs_or_item) == 2 and isinstance(pairs_or_item[1], DetectionConfig):
+        pairs, cfg = pairs_or_item
+    else:
+        pairs = pairs_or_item
+        cfg = config or DetectionConfig()
+
     results = []
     for t_a, t_b in pairs:
-        res = compare_tracks(t_a, t_b)
+        res = compare_tracks(t_a, t_b, config=cfg)
         if res.classification not in (DuplicateType.NO_MATCH, DuplicateType.UNCERTAIN):
             results.append(res)
     return results
@@ -52,7 +62,8 @@ class DisjointSet:
 def cluster_duplicates(
     tracks: List[AudioTrack],
     progress_callback=None,
-    is_cancelled=None
+    is_cancelled=None,
+    config: Optional[DetectionConfig] = None
 ) -> List[DuplicateGroup]:
     """
     Efficiently clusters duplicates from a list of scanned AudioTracks.
@@ -62,6 +73,7 @@ def cluster_duplicates(
     3. Union-Find graph clustering.
     4. Quality scoring and 'Best File' recommendation per group.
     """
+    config = config or DetectionConfig()
     if len(tracks) < 2:
         return []
 
@@ -192,7 +204,8 @@ def cluster_duplicates(
     if total_comparisons_est > 0:
         # Keep 1-2 CPU cores free to prevent system freeze and overheating
         cpu_cores = os.cpu_count() or 4
-        max_workers = max(1, min(6, cpu_cores - 1 if cpu_cores > 2 else cpu_cores))
+        default_workers = max(1, min(6, cpu_cores - 1 if cpu_cores > 2 else cpu_cores))
+        max_workers = config.max_workers if config.max_workers is not None else default_workers
         
         # Responsive chunk size for smooth UI progress
         chunk_size = min(1000, max(50, total_comparisons_est // (max_workers * 6) + 1))
@@ -201,7 +214,7 @@ def cluster_duplicates(
         # max_tasks_per_child=200: recycle worker processes periodically to prevent
         # memory leaks from numpy/ffmpeg accumulated buffers in long-running scans.
         with ProcessPoolExecutor(max_workers=max_workers, max_tasks_per_child=200) as executor:
-            futures = [executor.submit(_compare_chunk_worker, chunk) for chunk in chunks]
+            futures = [executor.submit(_compare_chunk_worker, chunk, config) for chunk in chunks]
             
             for future in as_completed(futures):
                 if is_cancelled and is_cancelled():

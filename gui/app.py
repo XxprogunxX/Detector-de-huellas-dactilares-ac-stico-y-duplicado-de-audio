@@ -83,7 +83,9 @@ class AudioDuplicateDetectorApp(QMainWindow):
                 f"No se pudo sincronizar el estado previo de las operaciones:\n{rec_err}\n"
                 "Por seguridad, revise sus archivos antes de ejecutar nuevas operaciones."
             )
-        self.scanner = AudioScanner(db=self.db)
+        from core.config import load_detection_config, save_detection_config, DetectionConfig
+        self.detection_config = load_detection_config()
+        self.scanner = AudioScanner(db=self.db, detection_config=self.detection_config)
         self.player = AudioPlayer.get_instance()
         self.worker = None
 
@@ -315,10 +317,35 @@ class AudioDuplicateDetectorApp(QMainWindow):
             self.set_active_folder(folder)
 
     def _on_settings_saved(self, config: dict):
-        if "similarity_threshold" in config:
-            self.scanner.similarity_threshold = config["similarity_threshold"]
-        if "threads" in config:
-            self.scanner.max_workers = config["threads"]
+        from core.config import DetectionConfig, save_detection_config
+        current_cfg = getattr(self.scanner, "detection_config", DetectionConfig())
+        sim_val = config.get("similarity_threshold")
+        if sim_val is not None:
+            possible_thresh = (sim_val * 100.0) if sim_val <= 1.0 else float(sim_val)
+        else:
+            possible_thresh = current_cfg.possible_threshold
+
+        ac_thresh = current_cfg.acoustic_threshold
+        if possible_thresh >= ac_thresh:
+            ac_thresh = min(100.0, possible_thresh + 5.0)
+
+        min_dur = float(config.get("min_duration", current_cfg.min_duration))
+        threads = int(config.get("threads", current_cfg.max_workers or 4))
+        spec = bool(config.get("spectral_fft", current_cfg.spectral_analysis))
+
+        new_cfg = DetectionConfig(
+            acoustic_threshold=ac_thresh,
+            possible_threshold=possible_thresh,
+            review_threshold=current_cfg.review_threshold,
+            max_auto_duration_diff=current_cfg.max_auto_duration_diff,
+            min_duration=min_dur,
+            spectral_analysis=spec,
+            max_workers=threads,
+        )
+        self.detection_config = new_cfg
+        self.scanner.detection_config = new_cfg
+        self.scanner.max_workers = threads
+        save_detection_config(new_cfg)
 
     # ─────────────────────────────────────────────────────────────────────────
     #  Scanning

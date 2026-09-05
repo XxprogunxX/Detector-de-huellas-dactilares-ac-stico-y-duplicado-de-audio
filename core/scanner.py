@@ -18,6 +18,7 @@ from core.metadata_extractor import extract_metadata
 from core.quality_analyzer import estimate_spectral_cutoff, evaluate_track_quality
 from core.database import Database
 from core.clustering import cluster_duplicates
+from core.config import DetectionConfig
 
 
 # CPU usage ceiling: if system CPU exceeds this, the scanner throttles
@@ -52,43 +53,62 @@ def _worker_process_init():
         pass  # Non-fatal: runs at normal priority if psutil unavailable
 
 
-def _process_audio_worker(filepath: str) -> Optional[Dict[str, Any]]:
+def _process_audio_worker(
+    filepath_or_args: Any,
+    min_duration: float = 5.0,
+    spectral_analysis: bool = True
+) -> Optional[Dict[str, Any]]:
     """
     Worker function executed in parallel processes to analyze a single audio file.
-    Order of operations is optimized for early-exit:
-      1. Fingerprint first (fpcalc, 60s window) — fastest way to detect corrupt/unsupported files
-      2. SHA256 + PCM hash only if fingerprint succeeded
-      3. Metadata and spectral cutoff last
+    Extracts SHA-256 and metadata for all files, while gating acoustic fingerprinting
+    by min_duration and spectral analysis by the spectral_analysis flag.
     """
     try:
+        if isinstance(filepath_or_args, tuple):
+            filepath = filepath_or_args[0]
+            if len(filepath_or_args) > 1:
+                min_duration = filepath_or_args[1]
+            if len(filepath_or_args) > 2:
+                spectral_analysis = filepath_or_args[2]
+        else:
+            filepath = filepath_or_args
+
         if not os.path.isfile(filepath):
             return None
 
         stat = os.stat(filepath)
         filesize = stat.st_size
+        if filesize == 0:
+            return None
         mtime = stat.st_mtime
 
-        # 1. Acoustic Fingerprint first — if fpcalc fails, the file is unusable
-        #    60s is sufficient for Chromaprint (was 120s, halving CPU time for this step).
-        try:
-            duration, raw_fp = extract_fingerprint(filepath, max_length_seconds=60)
-        except Exception:
-            return None  # Can't fingerprint → skip everything else
-
-        # 2. Metadata (bitrate, sample rate, channels, tags)
+        # 1. Metadata first (bitrate, sample rate, channels, tags, duration)
         meta = extract_metadata(filepath)
-        if duration <= 0.0:
-            duration = meta.get("duration", 0.0)
+        duration = meta.get("duration", 0.0)
 
-        # 3. Binary SHA-256 Hash
+        # 2. Binary SHA-256 Hash (always computed to preserve EXACT_HASH even for short files)
         sha256 = compute_file_sha256(filepath)
+
+        # 3. Acoustic Fingerprint (fpcalc)
+        # Gated by min_duration. If duration is unknown from metadata (0.0), attempt fpcalc to discover duration.
+        raw_fp = None
+        if duration <= 0.0 or duration >= min_duration:
+            try:
+                fp_dur, fp_data = extract_fingerprint(filepath, max_length_seconds=60)
+                if fp_dur > 0.0:
+                    duration = fp_dur
+                if duration >= min_duration:
+                    raw_fp = fp_data
+            except Exception:
+                raw_fp = None
 
         # 4. PCM Audio Hash (first 30s only — see fingerprint.py)
         audio_hash = compute_audio_pcm_hash(filepath)
 
-        # 5. Selective Spectral Cutoff (Only run FFT on Lossless to catch fake upscales)
+        # 5. Selective Spectral Cutoff
+        # Gated by spectral_analysis flag (Phase B / AC-006)
         is_lossless = meta.get("is_lossless", False)
-        if is_lossless:
+        if spectral_analysis and is_lossless:
             spectral_cutoff, fake_lossless_confidence = estimate_spectral_cutoff(filepath)
         else:
             br = meta.get("bitrate", 128)
@@ -122,12 +142,20 @@ def _process_audio_worker(filepath: str) -> Optional[Dict[str, Any]]:
 
 
 class AudioScanner:
-    def __init__(self, db: Optional[Database] = None, max_workers: Optional[int] = None):
+    def __init__(
+        self,
+        db: Optional[Database] = None,
+        max_workers: Optional[int] = None,
+        detection_config: Optional[DetectionConfig] = None
+    ):
         self.db = db or Database()
+        self.detection_config = detection_config or DetectionConfig()
         cpu_cores = os.cpu_count() or 4
 
-        if max_workers is not None:
-            self.max_workers = max_workers
+        # Prioritize explicit constructor argument, then config.max_workers, then adaptive heuristic
+        effective_workers = max_workers if max_workers is not None else self.detection_config.max_workers
+        if effective_workers is not None:
+            self.max_workers = effective_workers
         else:
             # Adaptive worker count: leave cores free for OS/GUI AND respect available RAM.
             # Each worker peak RAM: ~300-400 MB (ffmpeg decode + numpy FFT buffers).
@@ -197,6 +225,9 @@ class AudioScanner:
         self._pause_event.set()
         self.stats = ScanStats(is_running=True, phase="Descubriendo archivos...")
         start_time = time.time()
+
+        # Snapshot configuration at scan start to guarantee immutability (Phase B / AC-006)
+        scan_config = self.detection_config
 
         if progress_callback:
             progress_callback(self.stats)
@@ -278,7 +309,12 @@ class AudioScanner:
 
                 # Prime worker queue
                 for path in list(itertools.islice(file_iter, max_in_flight)):
-                    f = executor.submit(_process_audio_worker, path)
+                    f = executor.submit(
+                        _process_audio_worker,
+                        path,
+                        scan_config.min_duration,
+                        scan_config.spectral_analysis
+                    )
                     futures[f] = path
 
                 while futures:
@@ -332,7 +368,12 @@ class AudioScanner:
                         # Feed next file to worker pool
                         try:
                             next_path = next(file_iter)
-                            new_f = executor.submit(_process_audio_worker, next_path)
+                            new_f = executor.submit(
+                                _process_audio_worker,
+                                next_path,
+                                scan_config.min_duration,
+                                scan_config.spectral_analysis
+                            )
                             futures[new_f] = next_path
                         except StopIteration:
                             pass
@@ -383,7 +424,8 @@ class AudioScanner:
         groups = cluster_duplicates(
             all_tracks,
             progress_callback=clustering_progress,
-            is_cancelled=self.is_cancelled
+            is_cancelled=self.is_cancelled,
+            config=scan_config
         )
 
         # 5. Summarize Statistics

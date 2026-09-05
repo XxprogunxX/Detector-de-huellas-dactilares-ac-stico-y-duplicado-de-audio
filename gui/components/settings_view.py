@@ -174,6 +174,19 @@ class SettingsView(QWidget):
         self.chk_spectral.setChecked(True)
         grid1.addWidget(self.chk_spectral, 4, 1)
 
+        # Load persisted detection settings
+        try:
+            from core.config import load_detection_config
+            init_cfg = load_detection_config()
+            self.slider_sim.setValue(int(init_cfg.possible_threshold))
+            self.lbl_sim_val.setText(f"{int(init_cfg.possible_threshold)}%")
+            self.spin_duration.setValue(int(init_cfg.min_duration))
+            if init_cfg.max_workers:
+                self.spin_threads.setValue(init_cfg.max_workers)
+            self.chk_spectral.setChecked(init_cfg.spectral_analysis)
+        except Exception:
+            pass
+
         c1_layout.addLayout(grid1)
         layout.addWidget(card_scan)
 
@@ -319,15 +332,18 @@ class SettingsView(QWidget):
                 QMessageBox.warning(self, "Error", f"Error al limpiar: {e}")
 
     def _reset_defaults(self):
-        self.slider_sim.setValue(85)
-        self.spin_duration.setValue(5)
+        from core.config import DetectionConfig
+        cfg = DetectionConfig()
+        self.slider_sim.setValue(int(cfg.possible_threshold))
+        self.lbl_sim_val.setText(f"{int(cfg.possible_threshold)}%")
+        self.spin_duration.setValue(int(cfg.min_duration))
         self.chk_mp3.setChecked(True)
         self.chk_flac.setChecked(True)
         self.chk_wav.setChecked(True)
         self.chk_m4a.setChecked(True)
         self.chk_ogg.setChecked(True)
         self.chk_wma.setChecked(True)
-        self.chk_spectral.setChecked(True)
+        self.chk_spectral.setChecked(cfg.spectral_analysis)
         self.combo_policy.setCurrentIndex(0)
         QMessageBox.information(self, "Restablecido", "Se han restablecido los valores por defecto.")
 
