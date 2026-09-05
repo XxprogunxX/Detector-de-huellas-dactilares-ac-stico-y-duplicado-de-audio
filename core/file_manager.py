@@ -17,11 +17,39 @@ from core.models import DuplicateGroup, AudioTrack, FileAction
 from core.database import Database
 
 
+class JournalError(Exception):
+    """Raised when journal persistence operations fail."""
+    pass
+
+
 class OperationStatus(str, Enum):
     SUCCESS = "SUCCESS"
+    PARTIAL_SUCCESS = "PARTIAL_SUCCESS"
     PARTIAL_FAILURE = "PARTIAL_FAILURE"
     BLOCKED = "BLOCKED"
     FAILED = "FAILED"
+
+
+def is_volume_accessible(filepath: str) -> bool:
+    """
+    Checks if the filesystem volume, drive or root containing filepath is mounted and accessible.
+    Prevents treating disconnected NAS, external USB drives or network shares as 'deleted files'.
+    """
+    if not filepath:
+        return False
+    try:
+        abs_path = os.path.abspath(filepath)
+        drive, _ = os.path.splitdrive(abs_path)
+        if drive:
+            drive_root = drive + os.path.sep
+            return os.path.exists(drive_root)
+        else:
+            parent = os.path.dirname(abs_path)
+            if os.path.exists(parent):
+                return True
+            return os.path.exists(os.path.sep)
+    except Exception:
+        return False
 
 
 @dataclass
@@ -67,11 +95,15 @@ class OperationJournal:
     def _get_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=FULL;")
+        conn.execute("PRAGMA busy_timeout=10000;")
         return conn
 
     def _init_db(self):
+        conn = None
         try:
-            with self._get_connection() as conn:
+            conn = self._get_connection()
+            with conn:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS operation_journal (
                         op_id TEXT PRIMARY KEY,
@@ -84,41 +116,73 @@ class OperationJournal:
                     );
                 """)
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_op_journal_state ON operation_journal(state);")
-        except Exception:
-            pass
+                conn.commit()
+        except Exception as e:
+            raise JournalError(f"Fallo crítico al inicializar la base de datos del journal ({self.db_path}): {e}") from e
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def record_pending(self, op_id: str, filepath: str, action: str, target_path: Optional[str] = None):
+        conn = None
         try:
             now = datetime.now().isoformat()
-            with self._get_connection() as conn:
+            conn = self._get_connection()
+            with conn:
                 conn.execute(
                     "INSERT INTO operation_journal (op_id, filepath, action, target_path, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (op_id, filepath, action, target_path or "", "PENDING", now, now)
                 )
-        except Exception:
-            pass
+                conn.commit()
+        except Exception as e:
+            raise JournalError(f"Fallo al escribir estado PENDING en el journal para {filepath}: {e}") from e
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def update_state(self, op_id: str, state: str):
+        conn = None
         try:
             now = datetime.now().isoformat()
-            with self._get_connection() as conn:
+            conn = self._get_connection()
+            with conn:
                 conn.execute(
                     "UPDATE operation_journal SET state = ?, updated_at = ? WHERE op_id = ?",
                     (state, now, op_id)
                 )
-        except Exception:
-            pass
+                conn.commit()
+        except Exception as e:
+            raise JournalError(f"Fallo al actualizar estado a {state} en el journal (op_id={op_id}): {e}") from e
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def get_incomplete_operations(self) -> List[Dict[str, Any]]:
+        conn = None
         try:
-            with self._get_connection() as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
-                cursor.execute("SELECT * FROM operation_journal WHERE state = 'FS_DONE'")
-                rows = cursor.fetchall()
-                return [dict(r) for r in rows]
-        except Exception:
-            return []
+            conn = self._get_connection()
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM operation_journal WHERE state IN ('PENDING', 'FS_DONE') ORDER BY created_at ASC")
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            raise JournalError(f"Fallo al consultar operaciones incompletas del journal: {e}") from e
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def reconcile(self, db: Optional[Database] = None) -> List[str]:
         logs = []
@@ -126,21 +190,56 @@ class OperationJournal:
         for op in pending:
             op_id = op["op_id"]
             filepath = op["filepath"]
-            # If the file physically no longer exists at filepath, FS operation succeeded
-            if not os.path.exists(filepath):
-                if db is not None:
-                    try:
-                        db.delete_track(filepath)
+            action = op.get("action", "")
+            target_path = op.get("target_path", "")
+            state = op.get("state", "")
+
+            # Safety check: Storage volume / drive accessibility
+            if not is_volume_accessible(filepath):
+                logs.append(
+                    f"⚠️ Reconciliación omitida: El volumen o unidad para '{filepath}' no está accesible o está desconectado. "
+                    f"Operación {op_id} conservada como {state} para prevenir purga errónea de la biblioteca."
+                )
+                continue
+
+            if action == "backup":
+                if target_path and not is_volume_accessible(target_path):
+                    logs.append(
+                        f"⚠️ Reconciliación omitida: El volumen destino de backup para '{target_path}' no está accesible. "
+                        f"Operación {op_id} conservada como {state}."
+                    )
+                    continue
+
+                if not os.path.exists(filepath):
+                    if target_path and os.path.exists(target_path):
+                        if db is not None:
+                            try:
+                                db.delete_track(filepath)
+                            except Exception as e:
+                                logs.append(f"Reconciliación pendiente: error al sincronizar SQLite para backup de {os.path.basename(filepath)}: {e}")
+                                continue
                         self.update_state(op_id, "COMPLETED")
-                        logs.append(f"Reconciliación exitosa: registro de {os.path.basename(filepath)} purgado de SQLite tras verificar ausencia física en disco.")
-                    except Exception as e:
-                        logs.append(f"Reconciliación pendiente: error al intentar sincronizar SQLite para {os.path.basename(filepath)}: {e}")
+                        logs.append(f"Reconciliación exitosa: backup de {os.path.basename(filepath)} completado y registrado.")
+                    else:
+                        logs.append(f"⚠️ Reconciliación advertencia: archivo origen {filepath} ausente y destino {target_path} no encontrado.")
+                        self.update_state(op_id, "FAILED")
                 else:
-                    self.update_state(op_id, "COMPLETED")
-                    logs.append(f"Reconciliación: archivo {os.path.basename(filepath)} confirmado ausente en disco.")
+                    self.update_state(op_id, "ABORTED")
+                    logs.append(f"Reconciliación: backup pendiente para {os.path.basename(filepath)} descartado (archivo intacto en origen).")
             else:
-                self.update_state(op_id, "ABORTED")
-                logs.append(f"Reconciliación: operación para {os.path.basename(filepath)} descartada (archivo aún presente en disco).")
+                # trash or permanent
+                if not os.path.exists(filepath):
+                    if db is not None:
+                        try:
+                            db.delete_track(filepath)
+                        except Exception as e:
+                            logs.append(f"Reconciliación pendiente: error al intentar sincronizar SQLite para {os.path.basename(filepath)}: {e}")
+                            continue
+                    self.update_state(op_id, "COMPLETED")
+                    logs.append(f"Reconciliación exitosa: archivo {os.path.basename(filepath)} confirmado ausente en disco (estado previo: {state}). Registro purgado.")
+                else:
+                    self.update_state(op_id, "ABORTED")
+                    logs.append(f"Reconciliación: operación para {os.path.basename(filepath)} descartada (archivo aún presente en disco, estado previo: {state}). Marcado como ABORTED.")
         return logs
 
 
@@ -240,7 +339,23 @@ class FileOperationService:
         partial_failures = 0
         logs: List[str] = []
 
-        journal = OperationJournal(db_path=journal_path)
+        try:
+            journal = OperationJournal(db_path=journal_path)
+        except Exception as init_err:
+            logs.append(f"Error crítico de seguridad: no se pudo inicializar Operation Journal: {init_err}")
+            total_delete_requests = sum(
+                len([t for t in g.tracks if t.action == FileAction.DELETE])
+                for g in groups
+            )
+            return OperationResult(
+                success=0,
+                failed=total_delete_requests,
+                blocked=total_delete_requests,
+                logs=logs,
+                status=OperationStatus.BLOCKED,
+                reason=f"JOURNAL_INIT_FAILED: {init_err}"
+            )
+
         mode = mode.lower()
         if mode == "backup":
             if not destination_folder:
@@ -286,25 +401,36 @@ class FileOperationService:
                         except Exception as hook_err:
                             logs.append(f"Aviso hook previo a operación ({track.filename}): {hook_err}")
 
+                    resolved_target_path: Optional[str] = None
+                    if mode == "backup":
+                        target_filename = track.filename
+                        candidate_path = os.path.join(destination_folder, target_filename)
+                        counter = 1
+                        base_name, ext = os.path.splitext(target_filename)
+                        while os.path.exists(candidate_path):
+                            candidate_path = os.path.join(destination_folder, f"{base_name}_{counter}{ext}")
+                            counter += 1
+                        resolved_target_path = candidate_path
+
                     op_id = str(uuid.uuid4())
-                    journal.record_pending(op_id, track.filepath, mode, destination_folder)
+                    # Fail-closed journal: debe registrar PENDING de forma duradera antes de tocar filesystem
+                    try:
+                        journal.record_pending(op_id, track.filepath, mode, target_path=resolved_target_path)
+                    except Exception as j_err:
+                        logs.append(
+                            f"Error crítico de seguridad: Fallo al persistir PENDING en journal para {track.filename}: {j_err}. "
+                            f"Operación abortada para este archivo (filesystem intacto)."
+                        )
+                        failed += 1
+                        blocked += 1
+                        continue
 
                     action_ok = False
                     log_msg = ""
                     try:
                         if mode == "backup":
-                            target_filename = track.filename
-                            target_path = os.path.join(destination_folder, target_filename)
-
-                            # Evitar colisión en carpeta destino
-                            counter = 1
-                            base_name, ext = os.path.splitext(target_filename)
-                            while os.path.exists(target_path):
-                                target_path = os.path.join(destination_folder, f"{base_name}_{counter}{ext}")
-                                counter += 1
-
-                            shutil.move(track.filepath, target_path)
-                            log_msg = f"Movido a backup: {track.filename} -> {os.path.basename(target_path)}"
+                            shutil.move(track.filepath, resolved_target_path)
+                            log_msg = f"Movido a backup: {track.filename} -> {os.path.basename(resolved_target_path)}"
                             action_ok = True
 
                         elif mode == "trash":
@@ -316,6 +442,10 @@ class FileOperationService:
                             except ImportError:
                                 logs.append("Error crítico: El módulo 'send2trash' no está disponible en el entorno.")
                                 failed += 1
+                                try:
+                                    journal.update_state(op_id, "ABORTED")
+                                except Exception:
+                                    pass
                                 continue
 
                         elif mode == "permanent":
@@ -326,30 +456,55 @@ class FileOperationService:
                         else:
                             logs.append(f"Modo de operación desconocido: {mode}")
                             failed += 1
+                            try:
+                                journal.update_state(op_id, "ABORTED")
+                            except Exception:
+                                pass
                             continue
 
                     except Exception as e:
                         logs.append(f"Error procesando {track.filename}: {e}")
                         failed += 1
                         action_ok = False
+                        try:
+                            journal.update_state(op_id, "FAILED")
+                        except Exception:
+                            pass
 
                     # Sincronización solo tras éxito en sistema de archivos
                     if action_ok:
-                        journal.update_state(op_id, "FS_DONE")
+                        fs_done_ok = True
+                        try:
+                            journal.update_state(op_id, "FS_DONE")
+                        except Exception as j_err:
+                            fs_done_ok = False
+                            partial_failures += 1
+                            logs.append(
+                                f"⚠️ Error de journal tras modificar filesystem para {track.filename}: {j_err}. "
+                                f"Estado PENDING conservado para reconciliación posterior en el arranque."
+                            )
+
                         db_ok = True
                         if db is not None:
                             try:
                                 db.delete_track(track.filepath)
-                                journal.update_state(op_id, "COMPLETED")
                             except Exception as db_err:
                                 db_ok = False
                                 partial_failures += 1
                                 logs.append(
                                     f"⚠️ Aviso SQLite: archivo eliminado en disco pero no se pudo purgar de SQLite ({db_err}). "
-                                    f"Estado persistido en Operation Journal como FS_DONE para reconciliación automática."
+                                    f"Estado persistido en Operation Journal para reconciliación automática."
                                 )
-                        else:
-                            journal.update_state(op_id, "COMPLETED")
+
+                        if fs_done_ok and db_ok:
+                            try:
+                                journal.update_state(op_id, "COMPLETED")
+                            except Exception as comp_err:
+                                partial_failures += 1
+                                logs.append(
+                                    f"⚠️ Error al marcar COMPLETED en journal para {track.filename}: {comp_err}. "
+                                    f"La próxima reconciliación cerrará el registro idempotentemente."
+                                )
 
                         # Actualizar modelo en memoria
                         try:
@@ -361,22 +516,28 @@ class FileOperationService:
                         if group.best_track_path == track.filepath:
                             group.best_track_path = group.tracks[0].filepath if group.tracks else ""
 
-                        if db_ok:
+                        if db_ok and fs_done_ok:
                             logs.append(log_msg)
                             success += 1
 
             group.recalculate_space_saving()
 
-        # Determinar estado global
+        # Determinar estado global con precedencia estricta
         if partial_failures > 0:
             status = OperationStatus.PARTIAL_FAILURE
-            reason = "DB_SYNC_FAILED"
-        elif blocked > 0 and success == 0 and failed == 0:
-            status = OperationStatus.BLOCKED
-            reason = "MANUAL_REVIEW_REQUIRED"
-        elif failed > 0 and success == 0:
+            reason = "PARTIAL_FAILURE"
+        elif success > 0 and failed > 0:
+            status = OperationStatus.PARTIAL_FAILURE
+            reason = "MIXED_SUCCESS_AND_FAILURE"
+        elif success > 0 and blocked > 0:
+            status = OperationStatus.PARTIAL_SUCCESS
+            reason = "PARTIAL_SUCCESS"
+        elif failed > 0:
             status = OperationStatus.FAILED
             reason = "FS_OPERATION_FAILED"
+        elif blocked > 0:
+            status = OperationStatus.BLOCKED
+            reason = "MANUAL_REVIEW_REQUIRED"
         else:
             status = OperationStatus.SUCCESS
             reason = "OK"

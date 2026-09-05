@@ -5,6 +5,7 @@ Layout: Sidebar | Multi-View Stack (Biblioteca, Escaneo, Duplicados, Calidad, Co
 
 import os
 import sys
+import logging
 from typing import List, Optional
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -65,11 +66,23 @@ class AudioDuplicateDetectorApp(QMainWindow):
         self.setMinimumSize(1024, 680)
 
         self.db = Database()
+        logger = logging.getLogger(__name__)
         try:
             from core.file_manager import FileOperationService
-            FileOperationService.reconcile_pending_operations(self.db)
-        except Exception:
-            pass
+            reconcile_logs = FileOperationService.reconcile_pending_operations(self.db)
+            if reconcile_logs:
+                logger.info("Reconciliación al arranque completada: %s", reconcile_logs)
+                unresolved = [l for l in reconcile_logs if "⚠️" in l or "pendiente" in l.lower()]
+                if unresolved:
+                    logger.warning("Operaciones sin reconciliar o volúmenes no accesibles: %s", unresolved)
+        except Exception as rec_err:
+            logger.error("Error crítico en reconciliación al inicio: %s", rec_err, exc_info=True)
+            QMessageBox.warning(
+                self,
+                "Advertencia de Reconciliación",
+                f"No se pudo sincronizar el estado previo de las operaciones:\n{rec_err}\n"
+                "Por seguridad, revise sus archivos antes de ejecutar nuevas operaciones."
+            )
         self.scanner = AudioScanner(db=self.db)
         self.player = AudioPlayer.get_instance()
         self.worker = None
@@ -577,11 +590,36 @@ class AudioDuplicateDetectorApp(QMainWindow):
 
         modal = DeleteModal(self.filtered_groups, db=self.db, parent=self)
         if modal.exec() == QDialog.DialogCode.Accepted:
-            success, failed, logs = modal.execute_action()
-            msg = f"Archivos procesados: {success}"
-            if failed:
-                msg += f"\nErrores: {failed}"
-            QMessageBox.information(self, "Acción completada", msg)
+            result = modal.execute_action()
+            from core.file_manager import OperationStatus
+
+            if result.status == OperationStatus.SUCCESS:
+                title = "Acción completada"
+                msg = f"Archivos procesados exitosamente: {result.success}"
+                QMessageBox.information(self, title, msg)
+            elif result.status == OperationStatus.PARTIAL_SUCCESS:
+                title = "Operación completada parcialmente"
+                msg = f"Archivos procesados: {result.success}\nOmitidos/Bloqueados por seguridad: {result.blocked}"
+                QMessageBox.warning(self, title, msg)
+            elif result.status == OperationStatus.PARTIAL_FAILURE:
+                title = "Fallo parcial en la operación"
+                msg = f"Archivos modificados en disco: {result.success}\nFallos parciales/sincronización: {result.partial_failures + result.failed}"
+                if result.reason:
+                    msg += f"\nMotivo: {result.reason}"
+                QMessageBox.warning(self, title, msg)
+            elif result.status == OperationStatus.BLOCKED:
+                title = "Operación bloqueada"
+                msg = f"La operación fue bloqueada por políticas de seguridad.\nArchivos protegidos: {result.blocked}"
+                if result.reason:
+                    msg += f"\nMotivo: {result.reason}"
+                QMessageBox.warning(self, title, msg)
+            else:  # FAILED
+                title = "Error en la operación"
+                msg = f"No se pudo completar la operación.\nErrores: {result.failed}"
+                if result.reason:
+                    msg += f"\nMotivo: {result.reason}"
+                QMessageBox.critical(self, title, msg)
+
             self._save_current_session()
             self.library_view.reload_tracks()
             self._refresh_view()

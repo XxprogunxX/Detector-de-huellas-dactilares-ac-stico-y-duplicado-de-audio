@@ -335,16 +335,12 @@ class DeleteModal(QDialog):
         self.accept()
 
     # ── Public API ────────────────────────────────────────────────
-    def execute_action(self) -> tuple[int, int, list[str]]:
+    def execute_action(self):
         """
         Execute the selected deletion mode on marked files using centralized FileOperationService.
-        Returns (success_count, failed_count, log_lines).
+        Returns the full OperationResult object (which also supports tuple unpacking for backwards compatibility).
         """
-        from core.file_manager import FileOperationService
-
-        success = 0
-        failed = 0
-        logs: list[str] = []
+        from core.file_manager import FileOperationService, OperationResult, OperationStatus
 
         def _pre_hook(fp: str):
             try:
@@ -356,30 +352,35 @@ class DeleteModal(QDialog):
                 pass
 
         if self._selected_mode == "backup":
-            success, failed, logs = FileOperationService.backup(
+            result = FileOperationService.backup(
                 self.groups, self._backup_folder, db=self.db,
                 allow_manual_review_bypass=True,
                 pre_operation_hook=_pre_hook
             )
 
         elif self._selected_mode == "trash":
-            success, failed, logs = FileOperationService.trash(
+            result = FileOperationService.trash(
                 self.groups, db=self.db,
                 allow_manual_review_bypass=True,
                 pre_operation_hook=_pre_hook
             )
 
         elif self._selected_mode == "permanent":
-            success, failed, logs = FileOperationService.delete_permanently(
+            result = FileOperationService.delete_permanently(
                 self.groups, db=self.db,
                 allow_manual_review_bypass=True,
                 pre_operation_hook=_pre_hook
             )
+        else:
+            result = OperationResult(
+                success=0, failed=0, logs=["Modo desconocido"],
+                status=OperationStatus.FAILED, reason="UNKNOWN_MODE"
+            )
 
         if self._export_csv:
-            self._write_csv(logs)
+            self._write_csv(result.logs)
 
-        return success, failed, logs
+        return result
 
     def _write_csv(self, logs: list[str]):
         try:
