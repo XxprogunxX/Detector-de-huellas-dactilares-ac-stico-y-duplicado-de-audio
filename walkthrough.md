@@ -14,6 +14,51 @@ El sistema ha sido validado empíricamente a través del `Benchmark V5` (170 par
 
 * **`EXACT_HASH` (100%):** Coincidencia criptográfica idéntica byte-por-byte (excluye recodificaciones).
 * **`EXACT_AUDIO` (Coincidencia PCM):** Cortocircuito de coincidencia exacta sobre el audio crudo decodificado, con `confidence = 100.0`. Atrapa transcodificaciones puras (sin modificaciones) ignorando por completo el contenedor o el padding introducido por formatos con pérdida.
+
+## Fase C: Evaluación Espectral Basada en Evidencia (AC-005, AC-017) — COMPLETADA
+
+### Cambios Implementados:
+1. **Módulo de Tipos Desacoplado (`core/spectral_types.py`)**:
+   - `SpectralAssessment(str, Enum)`: `NO_LOSSY_EVIDENCE`, `SUSPECTED_TRANSCODE`, `UNKNOWN`, `NOT_ANALYZED`.
+   - `SpectralResult(dataclass(frozen=True))`: estructura inmutable, serializable (`to_dict` / `from_dict`), con validación de rango de `confidence` en `[0.0, 100.0]`.
+   - Cero dependencias circulares con `models.py`, GUI, FFmpeg o SQLite.
+
+2. **Modelo y Persistencia (`core/models.py`)**:
+   - `AudioTrack.spectral_assessment` tipado con fallback backward-compatible a `UNKNOWN` para sesiones legadas.
+
+3. **Motor Espectral Conservador (`core/quality_analyzer.py`)**:
+   - **Preservación Estéreo Sin Downmix**: Decodificación multi-canal. Cada canal es analizado de manera independiente. Si al menos un canal presenta contenido de alta frecuencia que contradice el cutoff lossy, NO se clasifica como `SUSPECTED_TRANSCODE`.
+   - **Muestreo Multi-Región Temporal**: Evaluación de 3 regiones independientes (inicio útil, central, final). Se descartan intros silenciosas o transitorias.
+   - **Respeto a Nyquist y Sample Rate Nativo**: Sin remuestreo forzado a 44100 Hz. Sample rates < 32000 Hz retornan `UNKNOWN` con razón `insufficient_frequency_bandwidth`.
+   - **Fail-Closed Estricto**: Archivos silenciosos (< -60 dBFS), cortos (< 3.0s), con menos de 16 ventanas válidas o con fallo de decodificación retornan `UNKNOWN`.
+   - **Thresholds Heurísticos Centralizados**:
+     - `PROVISIONAL_MIN_ENERGY_DBFS = -60.0`
+     - `PROVISIONAL_MIN_VALID_WINDOWS = 16`
+     - `PROVISIONAL_MIN_DURATION_SECONDS = 3.0`
+     - `PROVISIONAL_CUTOFF_ATTENUATION_DB = 40.0`
+     - `PROVISIONAL_PERSISTENCE_RATIO = 0.80`
+     - `PROVISIONAL_MIN_SAMPLE_RATE = 32000`
+   - **Puntuación de Calidad Prudente**: `NO_LOSSY_EVIDENCE`, `UNKNOWN` y `NOT_ANALYZED` reciben 0 bonus espectral en Fase C (bonus de +15 eliminado hasta calibración científica).
+   - **Wrapper Legado Fail-Closed (`estimate_spectral_cutoff`)**: Retorna `(0.0, 0.0)` en estados `UNKNOWN` y `NOT_ANALYZED`, impidiendo falsos positivos.
+
+4. **Worker y Pipeline (`core/scanner.py`)**:
+   - Eliminada cualquier invención de frecuencias de corte desde el bitrate.
+   - Gating estricto de FFT por bandera `spectral_analysis` y contenedor lossless (`is_lossless`). Archivos omitidos reciben `NOT_ANALYZED`.
+   - Preservación de contratos de mocks legados para backward compatibility.
+
+5. **Alineación de GUI**:
+   - `quality_view.py`, `duplicate_card.py`, `ab_comparison.py` actualizados para mostrar "Sin evidencia lossy detectada", "Posible transcodificación", "Resultado espectral no concluyente" y "Análisis espectral no realizado".
+
+---
+
+## Verificación y Pruebas
+
+- **Suite Fase C (`tests/test_phase_c_spectral.py`)**:
+  - **25 tests ejecutados — 25 PASS (0.44s)**.
+- **Suite Completa del Proyecto (`unittest discover -s tests`)**:
+  - **127 tests ejecutados — 127 PASS (26.83s)**.
+  - 102 tests previos (79 Fase A + 23 Fase B) + 25 tests nuevos de Fase C con 0 regresiones.
+
 * **`ACOUSTIC_DUPLICATE` (>= 95%):** Covers transcodificaciones de baja calidad, compresiones extremas, y reducciones de canal (Stereo a Mono).
 * **`POSSIBLE_DUPLICATE` (>= 80% y < 95%):** Reservado para casos donde el motor identifica una alta similitud pero existen variaciones acústicas reales (ej. remasterizaciones o adición de ecos superficiales).
 * **`LOW_CONFIDENCE_REVIEW` (>= 40% y < 80%):** Nueva "franja de aislamiento" introducida tras descubrir el bug de offset. Atrapa intencionalmente modificaciones severas (Tempo alterado, EQ extremo, aislamientos vocales simples) que destruyen parcialmente la huella acústica. Estos grupos **siempre** nacen en estado `UNSET` para forzar revisión humana y prevenir borrados accidentales.

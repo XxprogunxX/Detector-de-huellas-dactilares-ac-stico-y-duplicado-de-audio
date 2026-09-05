@@ -8,6 +8,9 @@ from typing import List, Optional, Dict, Any
 import os
 
 
+from core.spectral_types import SpectralAssessment, SpectralResult
+
+
 class DuplicateType(str, Enum):
     EXACT_HASH = "EXACT_HASH"                # 100% Bit-for-bit identical file hash
     EXACT_AUDIO = "EXACT_AUDIO"              # 100% Identical decoded PCM audio stream
@@ -40,6 +43,7 @@ class AudioTrack:
     is_lossless: bool = False
     spectral_cutoff: float = 0.0  # in Hz
     fake_lossless_confidence: float = 0.0  # 0.0 to 100.0%
+    spectral_assessment: SpectralAssessment = SpectralAssessment.UNKNOWN
     quality_score: float = 0.0
     quality_details: str = ""
     fingerprint_raw: List[int] = field(default_factory=list)
@@ -92,6 +96,7 @@ class AudioTrack:
             "is_lossless": self.is_lossless,
             "spectral_cutoff": self.spectral_cutoff,
             "fake_lossless_confidence": self.fake_lossless_confidence,
+            "spectral_assessment": self.spectral_assessment.value if isinstance(self.spectral_assessment, SpectralAssessment) else str(self.spectral_assessment),
             "quality_score": self.quality_score,
             "quality_details": self.quality_details,
             "title": self.title,
@@ -109,6 +114,16 @@ class AudioTrack:
         except Exception:
             action = FileAction.UNSET
 
+        raw_assess = data.get("spectral_assessment")
+        if raw_assess:
+            try:
+                spectral_assessment = SpectralAssessment(raw_assess)
+            except Exception:
+                spectral_assessment = SpectralAssessment.UNKNOWN
+        else:
+            # Historical session fallback: if not present in saved session, default to UNKNOWN
+            spectral_assessment = SpectralAssessment.UNKNOWN
+
         return cls(
             id=data.get("id"),
             filepath=data.get("filepath", ""),
@@ -125,6 +140,7 @@ class AudioTrack:
             is_lossless=bool(data.get("is_lossless", False)),
             spectral_cutoff=data.get("spectral_cutoff", 0.0),
             fake_lossless_confidence=float(data.get("fake_lossless_confidence", 0.0)),
+            spectral_assessment=spectral_assessment,
             quality_score=data.get("quality_score", 0.0),
             quality_details=data.get("quality_details", ""),
             fingerprint_raw=data.get("fingerprint_raw", []),

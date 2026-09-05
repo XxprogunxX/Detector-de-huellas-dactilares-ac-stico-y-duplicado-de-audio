@@ -179,10 +179,13 @@ class DuplicateGroupCard(QFrame):
             f"<b>Duración:</b> {track.formatted_duration}<br>"
             f"<b>Tamaño:</b> {track.formatted_size}"
         )
-        if track.fake_lossless_confidence > 50.0:
-            specs_text += f"<br><br><span style='color:{COLORS['warning']}'>⚠️ Transcodificación ({track.fake_lossless_confidence:.0f}%)</span>"
+        from core.spectral_types import SpectralAssessment
+        if track.spectral_assessment == SpectralAssessment.SUSPECTED_TRANSCODE or track.fake_lossless_confidence > 50.0:
+            specs_text += f"<br><br><span style='color:{COLORS['warning']}'>⚠️ Posible transcodificación ({track.fake_lossless_confidence:.0f}%)</span>"
+        elif track.spectral_assessment == SpectralAssessment.NO_LOSSY_EVIDENCE:
+            specs_text += f"<br><br><span style='color:{COLORS['success']}'>✓ Sin evidencia lossy detectada</span>"
         elif track.is_lossless:
-            specs_text += f"<br><br><span style='color:{COLORS['success']}'>✓ Lossless Auténtico</span>"
+            specs_text += f"<br><br><span style='color:{COLORS['success']}'>✓ Lossless ({track.format})</span>"
             
         lbl_specs = QLabel(specs_text)
         lbl_specs.setStyleSheet("border: none;")

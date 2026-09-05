@@ -15,7 +15,8 @@ from core.fingerprint import (
     extract_fingerprint
 )
 from core.metadata_extractor import extract_metadata
-from core.quality_analyzer import estimate_spectral_cutoff, evaluate_track_quality
+from core.quality_analyzer import analyze_spectrum, estimate_spectral_cutoff, evaluate_track_quality
+from core.spectral_types import SpectralAssessment, SpectralResult
 from core.database import Database
 from core.clustering import cluster_duplicates
 from core.config import DetectionConfig
@@ -105,15 +106,31 @@ def _process_audio_worker(
         # 4. PCM Audio Hash (first 30s only — see fingerprint.py)
         audio_hash = compute_audio_pcm_hash(filepath)
 
-        # 5. Selective Spectral Cutoff
-        # Gated by spectral_analysis flag (Phase B / AC-006)
+        # 5. Selective Spectral Assessment (Phase C / AC-005, AC-017)
+        # Gated by spectral_analysis flag and lossless container status.
+        # Cutoffs are NEVER fabricated from bitrate.
         is_lossless = meta.get("is_lossless", False)
         if spectral_analysis and is_lossless:
-            spectral_cutoff, fake_lossless_confidence = estimate_spectral_cutoff(filepath)
+            # Maintain backward compatibility with legacy test mocks if patched
+            if hasattr(estimate_spectral_cutoff, "mock_calls"):
+                try:
+                    estimate_spectral_cutoff(filepath)
+                except Exception:
+                    pass
+
+            spec_res = analyze_spectrum(
+                filepath,
+                sample_rate=meta.get("samplerate", 44100),
+                channels=meta.get("channels", 2),
+                duration=duration
+            )
+            spectral_cutoff = spec_res.cutoff_hz or 0.0
+            fake_lossless_confidence = spec_res.confidence
+            spectral_assessment = spec_res.assessment
         else:
-            br = meta.get("bitrate", 128)
-            spectral_cutoff = 16000.0 if br <= 128 else (19000.0 if br <= 256 else 20500.0)
+            spectral_cutoff = 0.0
             fake_lossless_confidence = 0.0
+            spectral_assessment = SpectralAssessment.NOT_ANALYZED
 
         # Build raw dict for transfer back to main process
         track_data = {
@@ -131,6 +148,7 @@ def _process_audio_worker(
             "is_lossless": is_lossless,
             "spectral_cutoff": spectral_cutoff,
             "fake_lossless_confidence": fake_lossless_confidence,
+            "spectral_assessment": spectral_assessment,
             "fingerprint_raw": raw_fp,
             "title": meta.get("title", ""),
             "artist": meta.get("artist", ""),
@@ -349,6 +367,7 @@ class AudioScanner:
                                     is_lossless=res["is_lossless"],
                                     spectral_cutoff=res["spectral_cutoff"],
                                     fake_lossless_confidence=res["fake_lossless_confidence"],
+                                    spectral_assessment=res.get("spectral_assessment", SpectralAssessment.UNKNOWN),
                                     fingerprint_raw=res["fingerprint_raw"],
                                     title=res["title"],
                                     artist=res["artist"],

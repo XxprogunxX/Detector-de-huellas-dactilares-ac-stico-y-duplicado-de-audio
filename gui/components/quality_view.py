@@ -401,13 +401,23 @@ class QualityView(QWidget):
                 item_cutoff.setForeground(QColor(COLORS["warning"]))
             self.table.setItem(row, 4, item_cutoff)
 
-            # 5. Diagnostic
-            if track.fake_lossless_confidence > 50.0:
-                diag = f"⚠️ Transcodificado ({track.fake_lossless_confidence:.0f}% prob.)"
+            # 5. Diagnostic (Evidence-based SpectralAssessment Phase C)
+            from core.spectral_types import SpectralAssessment
+            if track.spectral_assessment == SpectralAssessment.SUSPECTED_TRANSCODE or track.fake_lossless_confidence > 50.0:
+                diag = f"⚠️ Posible transcodificación ({track.fake_lossless_confidence:.0f}% consistencia)"
                 item_diag = QTableWidgetItem(diag)
                 item_diag.setForeground(QColor(COLORS["warning"]))
+            elif track.spectral_assessment == SpectralAssessment.NO_LOSSY_EVIDENCE:
+                item_diag = QTableWidgetItem("Sin evidencia lossy detectada")
+                item_diag.setForeground(QColor(COLORS["success"]))
+            elif track.spectral_assessment == SpectralAssessment.UNKNOWN and track.is_lossless:
+                item_diag = QTableWidgetItem("Resultado espectral no concluyente")
+                item_diag.setForeground(QColor(COLORS["text_muted"]))
+            elif track.spectral_assessment == SpectralAssessment.NOT_ANALYZED and track.is_lossless:
+                item_diag = QTableWidgetItem("Análisis espectral no realizado")
+                item_diag.setForeground(QColor(COLORS["text_muted"]))
             elif track.is_lossless:
-                item_diag = QTableWidgetItem("✓ Lossless Auténtico")
+                item_diag = QTableWidgetItem("Lossless (FLAC/WAV)")
                 item_diag.setForeground(QColor(COLORS["success"]))
             elif track.bitrate and track.bitrate < 192:
                 item_diag = QTableWidgetItem(f"Baja tasa de bits ({track.bitrate}k)")
