@@ -150,6 +150,7 @@ class EvidenceReport:
     duration_diff: Optional[float] = None
     spectral_diff: Optional[float] = None
     metadata_match: Optional[bool] = None
+    requires_manual_review: bool = False
     
     # Human readable explanation
     reasons: List[str] = field(default_factory=list)
@@ -170,11 +171,15 @@ class DuplicateGroup:
         if len(self.tracks) <= 1:
             self.space_saving_bytes = 0
             return 0
+        del_bytes = sum(t.filesize for t in self.tracks if t.action == FileAction.DELETE)
+        if del_bytes > 0:
+            self.space_saving_bytes = del_bytes
+            return self.space_saving_bytes
+
         total_bytes = sum(t.filesize for t in self.tracks)
-        # Find best track or track marked KEEP
         keep_tracks = [t for t in self.tracks if t.action == FileAction.KEEP]
         if keep_tracks:
-            kept_bytes = keep_tracks[0].filesize
+            kept_bytes = sum(t.filesize for t in keep_tracks)
         else:
             best = next((t for t in self.tracks if t.filepath == self.best_track_path), self.tracks[0])
             kept_bytes = best.filesize

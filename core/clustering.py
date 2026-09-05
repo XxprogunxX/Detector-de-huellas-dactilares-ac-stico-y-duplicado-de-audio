@@ -16,7 +16,7 @@ def _compare_chunk_worker(pairs: List[Tuple[AudioTrack, AudioTrack]]) -> List[Ev
     results = []
     for t_a, t_b in pairs:
         res = compare_tracks(t_a, t_b)
-        if res.classification != DuplicateType.NO_MATCH:
+        if res.classification not in (DuplicateType.NO_MATCH, DuplicateType.UNCERTAIN):
             results.append(res)
     return results
 
@@ -258,6 +258,7 @@ def cluster_duplicates(
         total_sim = 0.0
         pair_count = 0
 
+        has_weak_link = False
         for i in range(len(group_tracks)):
             for j in range(i + 1, len(group_tracks)):
                 p1 = group_tracks[i].filepath
@@ -267,34 +268,33 @@ def cluster_duplicates(
                     types_in_group.add(res.classification)
                     total_sim += res.confidence / 100.0
                     pair_count += 1
+                    if getattr(res, "requires_manual_review", False):
+                        has_weak_link = True
+                    if res.classification in (DuplicateType.POSSIBLE_DUPLICATE, getattr(DuplicateType, "LOW_CONFIDENCE_REVIEW", None)):
+                        has_weak_link = True
         
         avg_sim = (total_sim / pair_count) * 100.0 if pair_count > 0 else 100.0
 
-        has_weak_link = False
-        if DuplicateType.POSSIBLE_DUPLICATE in types_in_group:
-            has_weak_link = True
-        if hasattr(DuplicateType, "LOW_CONFIDENCE_REVIEW") and DuplicateType.LOW_CONFIDENCE_REVIEW in types_in_group:
-            has_weak_link = True
-
-        if DuplicateType.EXACT_HASH in types_in_group and len(types_in_group) == 1:
-            primary_type = DuplicateType.EXACT_HASH
-        elif DuplicateType.EXACT_AUDIO in types_in_group and len(types_in_group) <= 2:
-            primary_type = DuplicateType.EXACT_AUDIO
-        elif DuplicateType.ACOUSTIC_DUPLICATE in types_in_group:
-            primary_type = DuplicateType.ACOUSTIC_DUPLICATE
-        else:
-            primary_type = DuplicateType.POSSIBLE_DUPLICATE
-
         if has_weak_link:
             primary_type = DuplicateType.POSSIBLE_DUPLICATE
+            req_review = True
+        else:
+            if DuplicateType.EXACT_HASH in types_in_group and len(types_in_group) == 1:
+                primary_type = DuplicateType.EXACT_HASH
+            elif DuplicateType.EXACT_AUDIO in types_in_group and len(types_in_group) <= 2:
+                primary_type = DuplicateType.EXACT_AUDIO
+            elif DuplicateType.ACOUSTIC_DUPLICATE in types_in_group:
+                primary_type = DuplicateType.ACOUSTIC_DUPLICATE
+            else:
+                primary_type = DuplicateType.POSSIBLE_DUPLICATE
+            req_review = primary_type in (DuplicateType.POSSIBLE_DUPLICATE, getattr(DuplicateType, "LOW_CONFIDENCE_REVIEW", None))
 
         # Formulate human explanation for best track recommendation
         best_reason = f"Mayor fidelidad: {best_track.quality_details} (Puntuación: {best_track.quality_score}/100)"
         if best_track.fake_lossless_confidence > 50.0:
             best_reason = f"⚠️ Nota: Transcodificación probable ({best_track.fake_lossless_confidence:.0f}%). Se seleccionó la mejor fuente disponible."
-
-        # Determine if this group requires manual review
-        req_review = primary_type in (DuplicateType.POSSIBLE_DUPLICATE, DuplicateType.LOW_CONFIDENCE_REVIEW) if hasattr(DuplicateType, "LOW_CONFIDENCE_REVIEW") else (primary_type == DuplicateType.POSSIBLE_DUPLICATE)
+        if has_weak_link:
+            best_reason += " [Requiere Revisión Manual: el grupo contiene aristas no confirmadas o con variación de duración]"
 
         # Mark default actions: keep best, mark others as delete (or unset for review)
         for t in group_tracks:

@@ -10,6 +10,7 @@ import struct
 import hashlib
 import subprocess
 from typing import List, Tuple, Optional
+from dataclasses import dataclass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -171,38 +172,156 @@ def compute_audio_pcm_hash(filepath: str, sample_rate: int = 11025, max_seconds:
         return ""
 
 
+@dataclass(frozen=True)
+class AudioStreamInfo:
+    codec_name: str
+    sample_rate: int
+    channels: int
+    channel_layout: str
+    sample_fmt: str
+    bit_depth: int
+    is_lossless: bool
+
+
+LOSSLESS_CODECS = {
+    "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_s16be", "pcm_s24be", "pcm_s32be",
+    "pcm_u8", "pcm_f32le", "pcm_f64le", "flac", "alac", "wavpack", "ape", "tak", "shorten"
+}
+
+
+def get_audio_stream_info(filepath: str) -> Optional[AudioStreamInfo]:
+    """
+    Extracts essential audio stream parameters via ffprobe for strict information-preserving comparisons.
+    Queries: codec_name, sample_rate, channels, channel_layout, sample_fmt, bits_per_sample, bits_per_raw_sample.
+    """
+    if not filepath or not os.path.isfile(filepath):
+        return None
+
+    cmd = [
+        "ffprobe", "-v", "quiet", "-print_format", "json",
+        "-show_streams", "-select_streams", "a:0", filepath
+    ]
+    startupinfo = _get_low_priority_startupinfo() if sys.platform == "win32" else None
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            startupinfo=startupinfo,
+            timeout=10.0
+        )
+        if proc.returncode != 0:
+            return None
+        data = json.loads(proc.stdout)
+        streams = data.get("streams", [])
+        if not streams:
+            return None
+        s = streams[0]
+
+        codec = str(s.get("codec_name", "")).lower()
+        sr = int(s.get("sample_rate", 0) or 0)
+        ch = int(s.get("channels", 0) or 0)
+        layout = str(s.get("channel_layout", "")).lower().strip()
+        if not layout:
+            layout = "mono" if ch == 1 else ("stereo" if ch == 2 else str(ch))
+        fmt = str(s.get("sample_fmt", "")).lower().strip()
+
+        raw_bits = s.get("bits_per_raw_sample") or s.get("bits_per_sample")
+        bd = int(raw_bits) if raw_bits and str(raw_bits).isdigit() and int(raw_bits) > 0 else 16
+
+        is_lossless = codec in LOSSLESS_CODECS or codec.startswith("pcm_")
+
+        return AudioStreamInfo(
+            codec_name=codec,
+            sample_rate=sr,
+            channels=ch,
+            channel_layout=layout,
+            sample_fmt=fmt,
+            bit_depth=bd,
+            is_lossless=is_lossless
+        )
+    except Exception:
+        return None
+
+
+def get_canonical_pcm_format(info_a: AudioStreamInfo, info_b: AudioStreamInfo) -> Optional[str]:
+    """
+    Deterministically selects canonical PCM format ONLY if both audio streams are compatible
+    without losing information (no downmixing, no sample-rate alteration, matching bit depth).
+    Returns format string (e.g. 's16le', 's24le', 's32le') or None if incompatible.
+    """
+    # Reject mismatch in channel count or non-positive channels
+    if info_a.channels <= 0 or info_b.channels <= 0 or info_a.channels != info_b.channels:
+        return None
+
+    # Reject channel layout mismatch
+    if info_a.channel_layout and info_b.channel_layout and info_a.channel_layout != info_b.channel_layout:
+        return None
+
+    # Reject sample rate mismatch
+    if info_a.sample_rate <= 0 or info_b.sample_rate <= 0 or info_a.sample_rate != info_b.sample_rate:
+        return None
+
+    # Reject mixed lossy vs lossless (e.g. MP3 vs FLAC belongs to acoustic comparator)
+    if info_a.is_lossless != info_b.is_lossless:
+        return None
+
+    if info_a.is_lossless:
+        # Both are lossless: bit depths must match if specified
+        if info_a.bit_depth > 0 and info_b.bit_depth > 0 and info_a.bit_depth != info_b.bit_depth:
+            return None
+        max_bd = max(info_a.bit_depth, info_b.bit_depth)
+        if max_bd == 24:
+            return "s24le"
+        elif max_bd == 32:
+            return "s32le"
+        else:
+            return "s16le"
+    else:
+        # Both are lossy: codecs must be identical
+        if info_a.codec_name != info_b.codec_name:
+            return None
+        return "s16le"
+
+
 def verify_full_normalized_pcm_match(
     filepath_a: str,
     filepath_b: str,
-    sample_rate: int = 11025,
-    chunk_size: int = 65536
+    sample_rate: Optional[int] = None,
+    chunk_size: int = 65536,
+    **kwargs
 ) -> bool:
     """
-    Decodes both complete audio files to normalized raw mono PCM (s16le at sample_rate)
-    using streaming FFmpeg processes and compares them block by block.
-
-    Safety and performance guarantees:
-    - Never loads full files into RAM: streams in chunks (default 64 KB).
-    - Early exit: terminates immediately upon first mismatch or stream length difference.
-    - Fails safe: if either file does not exist, decodes to 0 bytes, or encounters any error,
-      returns False (never assumes equivalence).
-    - Low priority CPU usage: drops subprocesses to BELOW_NORMAL priority.
+    Strictly verifies full decoded PCM equivalence between two audio files.
+    Preserves all channel and sample-rate information (no downmix, no forced resampling).
+    Returns False immediately if streams are incompatible or differ at any sample.
     """
     if not filepath_a or not filepath_b:
         return False
     if not os.path.isfile(filepath_a) or not os.path.isfile(filepath_b):
         return False
 
+    info_a = get_audio_stream_info(filepath_a)
+    info_b = get_audio_stream_info(filepath_b)
+    if not info_a or not info_b:
+        return False
+
+    canonical_fmt = get_canonical_pcm_format(info_a, info_b)
+    if not canonical_fmt:
+        # Incompatible streams: reject strict EXACT_AUDIO
+        return False
+
     cmd_a = [
         "ffmpeg", "-v", "quiet", "-nostdin",
         "-i", filepath_a,
-        "-f", "s16le", "-ac", "1", "-ar", str(sample_rate),
+        "-f", canonical_fmt,
         "-"
     ]
     cmd_b = [
         "ffmpeg", "-v", "quiet", "-nostdin",
         "-i", filepath_b,
-        "-f", "s16le", "-ac", "1", "-ar", str(sample_rate),
+        "-f", canonical_fmt,
         "-"
     ]
 
@@ -258,10 +377,11 @@ def verify_full_normalized_pcm_match(
         for p in (proc_a, proc_b):
             if p is not None:
                 try:
-                    if p.poll() is None:
-                        p.kill()
                     if p.stdout is not None:
                         p.stdout.close()
+                    if p.poll() is None:
+                        p.kill()
+                    p.wait(timeout=1.0)
                 except Exception:
                     pass
 

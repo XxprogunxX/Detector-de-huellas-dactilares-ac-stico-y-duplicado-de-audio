@@ -193,7 +193,12 @@ def compare_tracks(track_a: AudioTrack, track_b: AudioTrack) -> EvidenceReport:
     if report.spectral_diff is not None:
         spectral_bonus = max(0.0, 1.0 * (1.0 - report.spectral_diff / 1000.0))
 
-    total_delta = offset_bonus + duration_bonus + duration_penalty + spectral_bonus
+    # Guard: do not apply positive bonuses if base acoustic similarity is too low
+    if base_confidence < 40.0:
+        total_delta = 0.0
+    else:
+        total_delta = offset_bonus + duration_bonus + duration_penalty + spectral_bonus
+
     final_confidence = base_confidence + total_delta
     
     # Limit between 0.0 and 99.9
@@ -213,15 +218,30 @@ def compare_tracks(track_a: AudioTrack, track_b: AudioTrack) -> EvidenceReport:
         report.reasons.append(f"Duplicado Acústico ({final_confidence:.1f}%): Misma grabación original.")
     elif final_confidence >= 80.0:
         report.classification = DuplicateType.POSSIBLE_DUPLICATE
+        report.requires_manual_review = True
         if duration_diff > 2.0:
             report.reasons.append(f"Posible Duplicado ({final_confidence:.1f}%): Variación de duración (posible versión extendida/directo).")
         else:
             report.reasons.append(f"Posible Duplicado ({final_confidence:.1f}%): Variación acústica (posible remasterización o transcodificación).")
     elif final_confidence >= 40.0:
         report.classification = DuplicateType.LOW_CONFIDENCE_REVIEW
+        report.requires_manual_review = True
         report.reasons.append(f"Revisión requerida ({final_confidence:.1f}%): Coincidencia parcial o posible error de detección.")
     else:
         report.classification = DuplicateType.NO_MATCH
         report.reasons.append(f"Pistas diferentes ({final_confidence:.1f}%).")
+
+    # 🛡️ Duration Firewall (AC-002): Regla de seguridad independiente del score.
+    # Una confianza alta no puede eludir una diferencia de duración estructural significativa (> 2.0s).
+    max_auto_duration_diff = 2.0
+    if duration_diff > max_auto_duration_diff:
+        if report.classification == DuplicateType.ACOUSTIC_DUPLICATE:
+            report.classification = DuplicateType.POSSIBLE_DUPLICATE
+            report.requires_manual_review = True
+            report.reasons.append(
+                f"🛡️ Duration Firewall: Degradado de ACOUSTIC_DUPLICATE a POSSIBLE_DUPLICATE "
+                f"por diferencia de duración ({duration_diff:.2f}s > {max_auto_duration_diff:.2f}s). "
+                f"Requiere revisión manual obligatoria para prevenir borrado accidental."
+            )
 
     return report

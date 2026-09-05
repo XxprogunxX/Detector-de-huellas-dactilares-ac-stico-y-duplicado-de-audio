@@ -346,19 +346,34 @@ class DeleteModal(QDialog):
         failed = 0
         logs: list[str] = []
 
-        if self._selected_mode == "backup" and self._backup_folder:
+        def _pre_hook(fp: str):
+            try:
+                from gui.components.audio_player import AudioPlayer
+                player = AudioPlayer.get_instance()
+                if getattr(player, "current_playing_file", None) == fp:
+                    player.stop()
+            except Exception:
+                pass
+
+        if self._selected_mode == "backup":
             success, failed, logs = FileOperationService.backup(
-                self.groups, self._backup_folder, db=self.db
+                self.groups, self._backup_folder, db=self.db,
+                allow_manual_review_bypass=True,
+                pre_operation_hook=_pre_hook
             )
 
         elif self._selected_mode == "trash":
             success, failed, logs = FileOperationService.trash(
-                self.groups, db=self.db
+                self.groups, db=self.db,
+                allow_manual_review_bypass=True,
+                pre_operation_hook=_pre_hook
             )
 
         elif self._selected_mode == "permanent":
             success, failed, logs = FileOperationService.delete_permanently(
-                self.groups, db=self.db
+                self.groups, db=self.db,
+                allow_manual_review_bypass=True,
+                pre_operation_hook=_pre_hook
             )
 
         if self._export_csv:

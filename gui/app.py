@@ -65,6 +65,11 @@ class AudioDuplicateDetectorApp(QMainWindow):
         self.setMinimumSize(1024, 680)
 
         self.db = Database()
+        try:
+            from core.file_manager import FileOperationService
+            FileOperationService.reconcile_pending_operations(self.db)
+        except Exception:
+            pass
         self.scanner = AudioScanner(db=self.db)
         self.player = AudioPlayer.get_instance()
         self.worker = None
